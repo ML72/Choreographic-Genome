@@ -3,9 +3,13 @@ import argparse
 import random
 import pickle
 import glob
+import json
+import math
+import heapq
 import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
+from matplotlib import gridspec
 from tqdm import tqdm
 import smplx
 import torch
@@ -574,9 +578,606 @@ def run_part_3():
         print_stats("Autonomous With Physics", auto_wp_stats, f)
 
 
+# =========================================================================== #
+#  Part 4: Artistic Case Studies (Structural Amplification)
+# --------------------------------------------------------------------------- #
+#  Rather than re-running the heavyweight ML benchmarks, Part 4 treats a small,
+#  deliberately heterogeneous corpus of culturally and structurally significant
+#  texts as input to the byte->codebook->choreography pipeline, and visualizes
+#  the "choreographic genome" each text produces.
+#
+#  The point is NOT classification accuracy; it is amplification: the system
+#  turns up the signal on the structural patterns that conventional,
+#  semantics-first generation discards. Each byte of each text maps to one of
+#  256 motion codebook regions; we then measure how much embodied movement the
+#  body must traverse to physically realize that text, and how distinct each
+#  text's genome is.
+#
+#  Outputs (under results/plots and results/metrics):
+#    - plot_5_choreographic_genome.png : stacked region-strip "genomes" per text
+#    - plot_6_amplification.png        : structural-amplification metrics
+#    - case_studies.txt (+ .json)      : machine-readable metrics
+#
+#  This is intentionally lightweight: it loads ONLY the precomputed plausibility
+#  graph (a few hundred KB), not the multi-GB motion index, so it runs in
+#  seconds.
+# =========================================================================== #
+
+GENOME_CMAP = "turbo"  # high-contrast, perceptually ordered map over region ids 0-255
+
+
+# Curated corpus. Each entry: key -> (category, short label, raw text). Chosen to
+# span the loud Western canon, the overlooked machine voice, marginalized and
+# Indigenous scripts silenced by ASCII-centric computing, and the boundary
+# between signal and noise.
+CASE_STUDIES = {
+    "canon": (
+        "Literary canon",
+        "Shakespeare, Sonnet 18",
+        "Shall I compare thee to a summer's day?",
+    ),
+    "machine": (
+        "Machine exhaust",
+        "Python traceback",
+        'Traceback (most recent call last): File "app.py", line 42, in <module>',
+    ),
+    "code": (
+        "Source code",
+        "A line of Python",
+        "for i in range(256): codebook[i] = kmeans.predict(x)",
+    ),
+    "devanagari": (
+        "Non-Latin script",
+        "Hindi (Devanagari): \"main nachta hoon\" / I dance",
+        "मैं नाचता हूँ",
+    ),
+    "cherokee": (
+        "Indigenous script",
+        "Cherokee syllabary: \"Tsalagi\"",
+        "ᏣᎳᎩ ᎦᏬᏂᎯᏍᏗ",
+    ),
+    "marginalized": (
+        "Marginalized voice",
+        "Sojourner Truth, 1851",
+        "Ain't I a woman?",
+    ),
+    "signal": (
+        "Signal vs. noise",
+        "SOS, in Morse",
+        "... --- ...",
+    ),
+}
+
+# Order controls top-to-bottom placement in the genome figure.
+ORDER = ["canon", "marginalized", "devanagari", "cherokee", "code", "machine", "signal"]
+
+
+def dijkstra_path(graph, start, target):
+    """Shortest path over the plausibility graph. Returns the list of nodes
+    AFTER start up to and including target (so direct edge -> [target],
+    same node -> [], unreachable -> [])."""
+    if start == target:
+        return []
+    queue = [(0.0, start, [])]
+    visited = set()
+    while queue:
+        cost, node, path = heapq.heappop(queue)
+        if node == target:
+            return path
+        if node not in visited:
+            visited.add(node)
+            for neighbor, weight in graph.get(node, {}).items():
+                if neighbor not in visited:
+                    heapq.heappush(queue, (cost + weight, neighbor, path + [neighbor]))
+    return []
+
+
+def levenshtein(a, b):
+    n, m = len(a), len(b)
+    if n == 0:
+        return m
+    if m == 0:
+        return n
+    prev = list(range(m + 1))
+    for i in range(1, n + 1):
+        cur = [i] + [0] * m
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[m]
+
+
+def shannon_entropy(values):
+    if not values:
+        return 0.0
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    total = len(values)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def analyze():
+    graph_path = os.path.join("data", "index", "plausibility_graph.pkl")
+    with open(graph_path, "rb") as f:
+        graph = pickle.load(f)
+
+    records = {}
+    for key in ORDER:
+        category, label, text = CASE_STUDIES[key]
+        raw = text.strip()
+        byte_seq = list(raw.encode("utf-8"))      # each byte -> a region id in [0,255]
+        regions = byte_seq                        # target choreographic DNA
+
+        # How much embodied movement must the body traverse to honor this text?
+        # For every adjacent pair of target regions we ask the plausibility graph
+        # how many physical "bridge" regions are needed to connect them safely.
+        bridges = 0
+        unreachable = 0
+        for a, b in zip(regions[:-1], regions[1:]):
+            if a == b:
+                continue
+            path = dijkstra_path(graph, a, b)
+            if path:
+                bridges += len(path) - 1          # intermediate bridge regions
+            else:
+                unreachable += 1                  # needs nearest-region proxy substitution
+
+        n_chars = len(raw)
+        n_bytes = len(byte_seq)
+        traversed = n_bytes + bridges             # total regions the body steps through
+        records[key] = {
+            "category": category,
+            "label": label,
+            "text": raw,
+            "regions": regions,
+            "n_chars": n_chars,
+            "n_bytes": n_bytes,
+            "unique_regions": len(set(regions)),
+            "region_entropy_bits": shannon_entropy(regions),
+            "bridges": bridges,
+            "unreachable": unreachable,
+            "regions_traversed": traversed,
+            # amplification factor: motion regions the body traverses per *character*
+            # of source text. ASCII canon ~1.0+bridges; multibyte scripts amplify.
+            "amplification_per_char": traversed / max(1, n_chars),
+            "bytes_per_char": n_bytes / max(1, n_chars),
+        }
+
+    # Pairwise structural divergence of the genomes (determinism + distinctness).
+    keys = ORDER
+    div = np.zeros((len(keys), len(keys)))
+    for i, ki in enumerate(keys):
+        for j, kj in enumerate(keys):
+            div[i, j] = levenshtein(records[ki]["regions"], records[kj]["regions"])
+
+    return records, div
+
+
+def plot_genome(records):
+    keys = ORDER
+    fig = plt.figure(figsize=(13, 7.2))
+    gs = gridspec.GridSpec(len(keys), 1, hspace=0.75, left=0.30, right=0.97,
+                           top=0.92, bottom=0.13)
+
+    max_len = max(len(records[k]["regions"]) for k in keys)
+
+    for row, k in enumerate(keys):
+        rec = records[k]
+        ax = fig.add_subplot(gs[row])
+        strip = np.array(rec["regions"]).reshape(1, -1)
+        ax.imshow(strip, aspect="auto", cmap=GENOME_CMAP, vmin=0, vmax=255,
+                  extent=[0, len(rec["regions"]), 0, 1], interpolation="nearest")
+        # uniform x-scale across rows so length differences are legible;
+        # headroom on the right keeps the longest strip's annotation on-canvas
+        ax.set_xlim(0, max_len * 1.18)
+        ax.set_yticks([])
+        ax.set_xticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # left-hand annotation: category + readable label, both kept inside the
+        # strip's own vertical band so they unambiguously attach to this row
+        ax.text(-0.012 * max_len, 0.70, rec["category"], ha="right", va="center",
+                fontsize=11, transform=ax.transData)
+        ax.text(-0.012 * max_len, 0.24, rec["label"], ha="right", va="center",
+                fontsize=7.5, style="italic", color="#444444", transform=ax.transData)
+        # right-hand annotation: regions traversed
+        ax.text(len(rec["regions"]) + 0.008 * max_len, 0.5,
+                f"{rec['regions_traversed']} regions",
+                ha="left", va="center", fontsize=8, color="#222222",
+                transform=ax.transData)
+
+    fig.suptitle("The choreographic genome: each text amplified into a sequence of motion regions",
+                 fontsize=13, y=0.985)
+
+    # shared colorbar describing the region encoding
+    cax = fig.add_axes([0.30, 0.065, 0.67, 0.016])
+    sm = plt.cm.ScalarMappable(cmap=GENOME_CMAP,
+                               norm=plt.Normalize(vmin=0, vmax=255))
+    cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
+    cb.set_label("Motion codebook region id (one per text byte)", fontsize=9)
+    cb.ax.tick_params(labelsize=8)
+
+    out = os.path.join("results", "plots", "plot_5_choreographic_genome.png")
+    plt.savefig(out, dpi=200)
+    plt.close()
+    print(f"Saved {out}")
+
+
+def plot_amplification(records):
+    keys = ORDER
+    cats = [records[k]["category"] for k in keys]
+    amp = [records[k]["amplification_per_char"] for k in keys]
+    ent = [records[k]["region_entropy_bits"] for k in keys]
+    bpc = [records[k]["bytes_per_char"] for k in keys]
+
+    colors = plt.cm.turbo(np.linspace(0.08, 0.92, len(keys)))
+    y = np.arange(len(keys))[::-1]  # first key on top
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.0))
+
+    # Panel 1: amplification factor (regions traversed per character), with the
+    # multibyte (non-Latin) component highlighted.
+    ax1.barh(y, amp, color=colors, edgecolor="white")
+    for yi, k in zip(y, keys):
+        bpcv = records[k]["bytes_per_char"]
+        if bpcv > 1.05:  # non-ASCII: more than one byte (hence region) per glyph
+            ax1.annotate(f"{bpcv:.1f} bytes/glyph",
+                         (records[k]["amplification_per_char"], yi),
+                         xytext=(4, 0), textcoords="offset points",
+                         va="center", fontsize=8, color="#333333")
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(cats, fontsize=10)
+    ax1.set_xlabel("Motion regions traversed per character (amplification factor)", fontsize=10)
+    ax1.set_title("Texts marginalized by ASCII are amplified into more movement", fontsize=11)
+    for s in ["top", "right"]:
+        ax1.spines[s].set_visible(False)
+
+    # Panel 2: structural entropy of the genome (how varied the movement is)
+    ax2.barh(y, ent, color=colors, edgecolor="white")
+    ax2.set_yticks(y)
+    ax2.set_yticklabels([records[k]["label"] for k in keys], fontsize=8)
+    ax2.set_xlabel("Region-distribution entropy (bits)", fontsize=10)
+    ax2.set_title("Each text carries a distinct structural signature", fontsize=11)
+    for s in ["top", "right"]:
+        ax2.spines[s].set_visible(False)
+
+    plt.tight_layout()
+    out = os.path.join("results", "plots", "plot_6_amplification.png")
+    plt.savefig(out, dpi=200)
+    plt.close()
+    print(f"Saved {out}")
+
+
+def write_metrics(records, div):
+    os.makedirs(os.path.join("results", "metrics"), exist_ok=True)
+    out = os.path.join("results", "metrics", "case_studies.txt")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("Artistic Case Studies — Structural Amplification Metrics\n")
+        f.write("=" * 60 + "\n\n")
+        for k in ORDER:
+            r = records[k]
+            f.write(f"[{r['category']}] {r['label']}\n")
+            f.write(f"    text                : {r['text']}\n")
+            f.write(f"    characters          : {r['n_chars']}\n")
+            f.write(f"    bytes (= regions)   : {r['n_bytes']}\n")
+            f.write(f"    bytes / character   : {r['bytes_per_char']:.3f}\n")
+            f.write(f"    unique regions      : {r['unique_regions']}\n")
+            f.write(f"    region entropy bits : {r['region_entropy_bits']:.3f}\n")
+            f.write(f"    bridge regions      : {r['bridges']}\n")
+            f.write(f"    unreachable (proxy) : {r['unreachable']}\n")
+            f.write(f"    regions traversed   : {r['regions_traversed']}\n")
+            f.write(f"    amplification/char  : {r['amplification_per_char']:.3f}\n\n")
+
+        f.write("Pairwise genome divergence (Levenshtein over region sequences)\n")
+        f.write("-" * 60 + "\n")
+        labels = [records[k]["category"][:10] for k in ORDER]
+        f.write("            " + " ".join(f"{l:>10}" for l in labels) + "\n")
+        for i, k in enumerate(ORDER):
+            row = " ".join(f"{div[i, j]:10.0f}" for j in range(len(ORDER)))
+            f.write(f"{labels[i]:>10}  {row}\n")
+        # mean off-diagonal divergence
+        n = len(ORDER)
+        off = [div[i, j] for i in range(n) for j in range(n) if i != j]
+        f.write(f"\nMean pairwise genome divergence: {np.mean(off):.2f}\n")
+    print(f"Saved {out}")
+
+    # also dump JSON for programmatic reuse / the website
+    jout = os.path.join("results", "metrics", "case_studies.json")
+    with open(jout, "w", encoding="utf-8") as f:
+        json.dump({k: {kk: vv for kk, vv in records[k].items()} for k in ORDER},
+                  f, ensure_ascii=False, indent=2)
+    print(f"Saved {jout}")
+
+
+def run_part_4():
+    print("Running Part 4: Artistic Case Studies (Structural Amplification)")
+    records, div = analyze()
+
+    # console summary
+    print("\n=== Structural Amplification Summary ===")
+    for k in ORDER:
+        r = records[k]
+        print(f"  {r['category']:18s} chars={r['n_chars']:3d} bytes={r['n_bytes']:3d} "
+              f"bridges={r['bridges']:3d} traversed={r['regions_traversed']:3d} "
+              f"amp/char={r['amplification_per_char']:.2f} "
+              f"entropy={r['region_entropy_bits']:.2f}")
+    n = len(ORDER)
+    off = [div[i, j] for i in range(n) for j in range(n) if i != j]
+    print(f"\n  Mean pairwise genome divergence: {np.mean(off):.2f}")
+
+    plot_genome(records)
+    plot_amplification(records)
+    write_metrics(records, div)
+
+
+# =========================================================================== #
+#  Part 5: Rendered Choreography Montages
+# --------------------------------------------------------------------------- #
+#  Render the physicalized choreography produced by the case-study texts, so the
+#  embodied dance can be shown as renders (not UI plots). Three figures:
+#    - plot_8_teaser.png       : one expressive keyframe for each of the seven
+#                                case-study texts, side by side.
+#    - plot_7_dance_montage.png: time-sampled keyframe strips for a contrasting
+#                                trio (a sonnet, an error log, an Indigenous
+#                                script), each shown as a sequence over time.
+#    - plot_9_trail.png        : a chronophotographic long-exposure sweep of one
+#                                dance across time.
+#
+#  All motion is generated by the same deterministic engine; nothing here is
+#  posed by hand. Uses pyrender, so it takes a few minutes.
+# =========================================================================== #
+
+# key -> (register, readable sub-label, short teaser label, raw input text).
+# Mirrors CASE_STUDIES above so figures and metrics agree.
+CORPUS = {
+    "canon":        ("Literary canon",    "Shakespeare, Sonnet 18", "Sonnet",
+                     "Shall I compare thee to a summer's day?"),
+    "marginalized": ("Marginalized voice", "Sojourner Truth, 1851", "Sojourner Truth",
+                     "Ain't I a woman?"),
+    "devanagari":   ("Non-Latin script",  "Hindi / Devanagari", "Devanagari",
+                     "मैं नाचता हूँ"),
+    "cherokee":     ("Indigenous script", "Cherokee syllabary", "Cherokee",
+                     "ᏣᎳᎩ ᎦᏬᏂᎯᏍᏗ"),
+    "code":         ("Source code",       "A line of Python", "Python",
+                     "for i in range(256): codebook[i] = kmeans.predict(x)"),
+    "machine":      ("Machine exhaust",   "Python traceback", "Traceback",
+                     'Traceback (most recent call last): File "app.py", line 42, in <module>'),
+    "signal":       ("Signal vs. noise",  "SOS, in Morse", "SOS",
+                     "... --- ..."),
+}
+
+TEASER_ORDER = ["canon", "marginalized", "devanagari", "cherokee", "code", "machine", "signal"]
+MONTAGE_KEYS = ["canon", "machine", "cherokee"]  # a deliberately contrasting trio
+
+N_KEYS = 6                      # keyframes per row in the montage
+VIEW_W, VIEW_H = 420, 540
+CHAR_COLOR = [0.5, 0.2, 0.8, 1.0]  # neutral purple
+
+
+def build_scene(grid=True):
+    scene = pyrender.Scene(ambient_light=(0.6, 0.6, 0.6), bg_color=[1.0, 1.0, 1.0, 1.0])
+    camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
+
+    key_light = pyrender.DirectionalLight(color=[1.0, 0.95, 0.9], intensity=2.5)
+    kl = np.eye(4); kl[:3, :3] = tra.euler_matrix(np.radians(-45), np.radians(45), 0)[:3, :3]
+    scene.add(key_light, pose=kl)
+    fill_light = pyrender.DirectionalLight(color=[0.9, 0.95, 1.0], intensity=1.2)
+    fl = np.eye(4); fl[:3, :3] = tra.euler_matrix(np.radians(-30), np.radians(-45), 0)[:3, :3]
+    scene.add(fill_light, pose=fl)
+    back_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=2.0)
+    bl = np.eye(4); bl[:3, :3] = tra.euler_matrix(np.radians(-135), 0, 0)[:3, :3]
+    scene.add(back_light, pose=bl)
+
+    if grid:
+        # floor + grid for spatial grounding (used in the detailed montage)
+        floor = trimesh.creation.box(extents=[40.0, 0.02, 40.0]); floor.apply_translation([0, -0.01, 0])
+        floor_mat = pyrender.MetallicRoughnessMaterial(baseColorFactor=[0.96, 0.96, 0.96, 1.0],
+                                                       metallicFactor=0.1, roughnessFactor=0.85)
+        scene.add(pyrender.Mesh.from_trimesh(floor, material=floor_mat, smooth=False))
+        cyls = []
+        for x in np.arange(-6, 7, 1):
+            c = trimesh.creation.cylinder(radius=0.005, height=12.0); c.apply_translation([x, 0.01, 0]); cyls.append(c)
+        for z in np.arange(-6, 7, 1):
+            c = trimesh.creation.cylinder(radius=0.005, height=12.0)
+            c.apply_transform(tra.rotation_matrix(np.pi / 2, [0, 1, 0])); c.apply_translation([0, 0.01, z]); cyls.append(c)
+        gridmesh = trimesh.util.concatenate(cyls)
+        grid_mat = pyrender.MetallicRoughnessMaterial(baseColorFactor=[0.7, 0.7, 0.7, 1.0],
+                                                      metallicFactor=0.0, roughnessFactor=1.0)
+        scene.add(pyrender.Mesh.from_trimesh(gridmesh, material=grid_mat, smooth=False))
+
+    cam_pose = np.eye(4) @ tra.rotation_matrix(np.radians(-12), [1, 0, 0])
+    cam_pose[1, 3] = 0.9
+    cam_pose[2, 3] = 3.0
+    scene.add(camera, pose=cam_pose)
+    return scene
+
+
+def render_keyframes(poses, trans, indices, body_model, color, grid=True):
+    scene = build_scene(grid=grid)
+    renderer = pyrender.OffscreenRenderer(viewport_width=VIEW_W, viewport_height=VIEW_H)
+    mat = pyrender.MetallicRoughnessMaterial(baseColorFactor=color, metallicFactor=0.2,
+                                             roughnessFactor=0.6, doubleSided=True)
+    imgs = []
+    for idx in indices:
+        p = torch.tensor(np.asarray(poses[idx:idx + 1]), dtype=torch.float32)
+        y = float(np.asarray(trans[idx])[1])
+        transl = torch.tensor([[0.0, y, 0.0]], dtype=torch.float32)  # center horizontally
+        out = body_model(global_orient=p[:, :3], body_pose=p[:, 3:], transl=transl)
+        verts = out.vertices.detach().cpu().numpy().squeeze()
+        mesh = trimesh.Trimesh(verts, body_model.faces)
+        node = scene.add(pyrender.Mesh.from_trimesh(mesh, material=mat, smooth=True))
+        color_img, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        scene.remove_node(node)
+        imgs.append(color_img[..., :3])
+    renderer.delete()
+    return imgs
+
+
+def pick_expressive_frame(poses, trans, body_model):
+    """Choose the most 'open' pose (limbs farthest from the pelvis) from the
+    middle of the sequence, so each teaser body reads as a dynamic silhouette."""
+    n = len(poses)
+    lo, hi = int(n * 0.15), int(n * 0.90)
+    cands = np.linspace(lo, max(lo + 1, hi), 8).astype(int)
+    best, best_spread = int(cands[len(cands) // 2]), -1.0
+    try:
+        for idx in cands:
+            p = torch.tensor(np.asarray(poses[idx:idx + 1]), dtype=torch.float32)
+            out = body_model(global_orient=p[:, :3], body_pose=p[:, 3:],
+                             transl=torch.zeros((1, 3), dtype=torch.float32))
+            j = out.joints.detach().cpu().numpy().squeeze()
+            spread = float(np.linalg.norm(j - j[0:1], axis=1).sum())
+            if spread > best_spread:
+                best_spread, best = spread, int(idx)
+    except Exception as e:
+        print(f"  (expressive-frame fallback: {e})")
+    return best
+
+
+def render_teaser(motions, body_model):
+    order = TEASER_ORDER
+    fig, axes = plt.subplots(1, len(order), figsize=(len(order) * 1.7, 2.7))
+    for ax, key in zip(axes, order):
+        register, sublabel, tlabel, poses, trans = motions[key]
+        idx = pick_expressive_frame(poses, trans, body_model)
+        img = render_keyframes(poses, trans, [idx], body_model, CHAR_COLOR, grid=False)[0]
+        ax.imshow(img)
+        ax.set_xticks([]); ax.set_yticks([])
+        for s in ax.spines.values():
+            s.set_visible(False)
+        ax.set_xlabel(tlabel, fontsize=9.5)
+    plt.tight_layout()
+    out = "results/plots/plot_8_teaser.png"
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved {out}")
+
+
+def render_montage(motions, body_model):
+    keys = MONTAGE_KEYS
+    fig, axes = plt.subplots(len(keys), N_KEYS, figsize=(N_KEYS * 1.85, len(keys) * 2.55))
+    for r, key in enumerate(keys):
+        register, sublabel, tlabel, poses, trans = motions[key]
+        n = len(poses)
+        lo, hi = int(n * 0.06), int(n * 0.94)
+        indices = np.linspace(lo, max(lo + 1, hi), N_KEYS).astype(int)
+        imgs = render_keyframes(poses, trans, indices, body_model, CHAR_COLOR, grid=True)
+        for c in range(N_KEYS):
+            ax = axes[r, c]
+            ax.imshow(imgs[c]); ax.set_xticks([]); ax.set_yticks([])
+            for s in ax.spines.values():
+                s.set_visible(False)
+            if c == 0:
+                ax.set_ylabel(register, fontsize=11)
+        axes[r, 0].text(0.0, -0.13, sublabel, transform=axes[r, 0].transAxes,
+                        fontsize=8.5, style="italic", color="#444")
+    plt.tight_layout()
+    out = "results/plots/plot_7_dance_montage.png"
+    fig.savefig(out, dpi=170, bbox_inches="tight")
+    plt.close()
+    print(f"Saved {out}")
+
+
+def render_trail(motions, body_model, key, out_name):
+    """A chronophotographic 'motion study': sample one dance across time, spread
+    the frames left to right, color them by moment, and composite them into a
+    single long-exposure sweep. The whole image is produced from the byte
+    structure of one text."""
+    register, sublabel, tlabel, poses, trans = motions[key]
+    n = len(poses)
+    n_frames = 14
+    lo, hi = int(n * 0.08), int(n * 0.92)
+    idxs = np.linspace(lo, max(lo + 1, hi), n_frames).astype(int)
+    spread = 3.8
+    xs = np.linspace(-spread / 2.0, spread / 2.0, n_frames)
+    W, H = 1800, 640
+
+    scene = pyrender.Scene(ambient_light=(0.6, 0.6, 0.6), bg_color=[1.0, 1.0, 1.0, 0.0])
+    key_light = pyrender.DirectionalLight(color=[1.0, 0.95, 0.9], intensity=2.5)
+    kl = np.eye(4); kl[:3, :3] = tra.euler_matrix(np.radians(-45), np.radians(45), 0)[:3, :3]
+    scene.add(key_light, pose=kl)
+    fill_light = pyrender.DirectionalLight(color=[0.9, 0.95, 1.0], intensity=1.2)
+    fl = np.eye(4); fl[:3, :3] = tra.euler_matrix(np.radians(-30), np.radians(-45), 0)[:3, :3]
+    scene.add(fill_light, pose=fl)
+    back_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=2.0)
+    bl = np.eye(4); bl[:3, :3] = tra.euler_matrix(np.radians(-135), 0, 0)[:3, :3]
+    scene.add(back_light, pose=bl)
+    camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
+    cam_pose = np.eye(4) @ tra.rotation_matrix(np.radians(-10), [1, 0, 0])
+    cam_pose[1, 3] = 0.9
+    cam_pose[2, 3] = 3.3
+    scene.add(camera, pose=cam_pose)
+
+    renderer = pyrender.OffscreenRenderer(viewport_width=W, viewport_height=H)
+    cmap = plt.get_cmap("turbo")
+    canvas = np.ones((H, W, 3), dtype=float)
+    for i, idx in enumerate(idxs):
+        col = cmap(0.08 + 0.84 * i / (n_frames - 1))
+        mat = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[col[0], col[1], col[2], 1.0],
+            metallicFactor=0.2, roughnessFactor=0.6, doubleSided=True)
+        p = torch.tensor(np.asarray(poses[idx:idx + 1]), dtype=torch.float32)
+        y = float(np.asarray(trans[idx])[1])
+        transl = torch.tensor([[float(xs[i]), y, 0.0]], dtype=torch.float32)
+        out = body_model(global_orient=p[:, :3], body_pose=p[:, 3:], transl=transl)
+        verts = out.vertices.detach().cpu().numpy().squeeze()
+        mesh = trimesh.Trimesh(verts, body_model.faces)
+        node = scene.add(pyrender.Mesh.from_trimesh(mesh, material=mat, smooth=True))
+        rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        scene.remove_node(node)
+        rgb = rgba[..., :3].astype(float) / 255.0
+        alpha = (rgba[..., 3].astype(float) / 255.0)[..., None]
+        weight = 0.30 + 0.70 * (i / (n_frames - 1))
+        alpha = alpha * weight
+        canvas = canvas * (1.0 - alpha) + rgb * alpha
+    renderer.delete()
+
+    canvas = np.clip(canvas, 0.0, 1.0)
+    # crop away surrounding whitespace for a tight frame
+    mask = (canvas < 0.98).any(axis=2)
+    rows = np.where(mask.any(axis=1))[0]
+    cols = np.where(mask.any(axis=0))[0]
+    if len(rows) and len(cols):
+        pad = 25
+        r0, r1 = max(0, rows[0] - pad), min(canvas.shape[0], rows[-1] + pad)
+        c0, c1 = max(0, cols[0] - pad), min(canvas.shape[1], cols[-1] + pad)
+        canvas = canvas[r0:r1, c0:c1]
+    fig = plt.figure(figsize=(canvas.shape[1] / 220.0, canvas.shape[0] / 220.0))
+    ax = fig.add_axes([0, 0, 1, 1]); ax.imshow(canvas); ax.axis("off")
+    fig.savefig(f"results/plots/{out_name}", dpi=220)
+    plt.close()
+    print(f"Saved results/plots/{out_name}")
+
+
+def run_part_5():
+    print("Running Part 5: Rendered Choreography Montages")
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    np.random.seed(7)
+    body_model = smplx.create("models", model_type="smpl", gender="neutral", batch_size=1)
+
+    # Generate the choreography for every case-study text once, then reuse it for
+    # both the teaser (breadth: 7 texts) and the montage (depth: 3 texts over time).
+    motions = {}
+    for key in TEASER_ORDER:
+        register, sublabel, tlabel, text = CORPUS[key]
+        print(f"Generating choreography for: {register} — {sublabel}")
+        _, poses, trans = generate_motion(0, f"fig_{key}", input_text=text,
+                                          gender="neutral", physics_algorithms_on=True,
+                                          render_video=False, verbose=False)
+        print(f"  frames={len(poses)}")
+        motions[key] = (register, sublabel, tlabel, poses, trans)
+
+    render_teaser(motions, body_model)
+    render_montage(motions, body_model)
+    render_trail(motions, body_model, "devanagari", "plot_9_trail.png")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--part', type=int, choices=[1, 2, 3], help="Run a specific part of the analysis (1, 2, or 3).")
+    parser.add_argument('--part', type=int, choices=[1, 2, 3, 4, 5], help="Run a specific part of the analysis (1, 2, 3, 4, or 5).")
     args = parser.parse_args()
     
     np.random.seed(42)
@@ -593,6 +1194,12 @@ def main():
         
     if args.part == 3 or args.part is None:
         run_part_3()
+
+    if args.part == 4 or args.part is None:
+        run_part_4()
+
+    if args.part == 5 or args.part is None:
+        run_part_5()
 
 if __name__ == "__main__":
     main()
