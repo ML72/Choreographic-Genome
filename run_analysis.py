@@ -855,7 +855,7 @@ def write_metrics(records, div):
     os.makedirs(os.path.join("results", "metrics"), exist_ok=True)
     out = os.path.join("results", "metrics", "case_studies.txt")
     with open(out, "w", encoding="utf-8") as f:
-        f.write("Artistic Case Studies — Structural Amplification Metrics\n")
+        f.write("Artistic Case Studies: Structural Amplification Metrics\n")
         f.write("=" * 60 + "\n\n")
         for k in ORDER:
             r = records[k]
@@ -1163,7 +1163,7 @@ def run_part_5():
     motions = {}
     for key in TEASER_ORDER:
         register, sublabel, tlabel, text = CORPUS[key]
-        print(f"Generating choreography for: {register} — {sublabel}")
+        print(f"Generating choreography for {register}: {sublabel}")
         _, poses, trans = generate_motion(0, f"fig_{key}", input_text=text,
                                           gender="neutral", physics_algorithms_on=True,
                                           render_video=False, verbose=False)

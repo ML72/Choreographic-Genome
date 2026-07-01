@@ -1,6 +1,6 @@
-# Text in Motion - Webapp
+# The Choreographic Genome - Webapp
 
-This directory contains the web application to view the generated dance routines.
+This directory contains the web application (project page) for the paper, presenting the choreographic-genome method and the generated dance routines.
 
 ## Setup and Run
 
