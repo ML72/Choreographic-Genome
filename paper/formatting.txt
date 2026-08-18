@@ -1,0 +1,70 @@
+Formatting Guidelines for VGTC Conference Style Papers
+Please use the following templates for papers accepted as conference-only tracks, short papers, notes, workshops, panels, posters, contests/challenge, and tutorials:
+
+LaTeX template (last updated February 12, 2024)
+Microsoft Word template (last updated February 14, 2024)
+Typst template (last updated January 29, 2026)
+Sample PDF paper (latest version: February 14, 2024)
+If your paper is part of a TVCG Special Issue (i.e., VIS full papers, ISMAR, VR accepted Long Papers, PacificVis Papers etc.) please use the TVCG journal track template.
+
+If you are unsure which template style you should be using, please contact the appropriate track chairs of your conference. All inquiries and questions about document formatting can be directed to the VGTC Publications Chair at submissions@vgtc.org.
+
+Summary of Format
+SIZE AND MARGINS
+It is very important to follow these margins exactly or you run the risk of loosing text when the final paper is produced at a smaller trim size.
+
+Paper Size: 8.5 inches by 11.0 inches (21.59cm by 27.94cm)
+Top Margin: 0.75 inch (1.905 cm)
+Bottom Margin: 1.0 inch (2.54 cm)
+Left Margin: 0.75 inch (1.905 cm)
+Right Margin: 0.75 inch (1.905 cm)
+Columns: Two (2) columns, each 3.33 inches (8.46 cm) wide
+Column Gutter: 0.34 inches (0.84 cm) column gutter
+TITLE
+Title Text: 14.5pt Helvetica (or Arial), bold, centered
+Capitalize the first letter of nouns, pronouns, verbs, adjectives, and adverbs; do not capitalize articles, coordinate conjunctions, or prepositions (unless the title begins with such a word). Capitalize the second word in compound words if it is a noun or proper adjective or the words have equal weight (Cross-Reference, Run-Time).
+Leave two blank lines after the title.
+AUTHOR LIST AND AFFILIATION
+Author Names: 10pt Helvetica (or Arial), centered.
+Multiple authors: multiple columns.
+Affiliation should include full names, company / institution identification, and email addresses.
+Affiliations are centered below each author name in 8pt, not bold.
+Include e-mail addresses as a footnote with a horizontal rule above the footnote area.
+Follow the author information by two blank lines before main text.
+COPYRIGHT SPACE
+A 0.5 inch (1.18 cm) space must be left at the bottom of the left column on the first page of the paper for the copyright information added during the printing process.
+ABSTRACT
+The word “ABSTRACT”: 9pt Helvetica (or Arial), bold, flush left, small caps, and not numbered.
+Abstract content begins on a new line.
+Body Text: 9pt Times or Times Roman, justified on 10pt leading; up to 3 in. (7.62 cm) long.
+Leave one blank line after the abstract.
+INDEX TERMS
+The words “Index Terms”: 9pt Times or Times Roman, bold, flush left, and not numbered.
+Body Text: 9pt Times or Times Roman, justified on 10pt leading.
+Descriptors from the ACM Computing Classification System, located at https://www.acm.org/about-acm/class, should be used.
+A list of relevant index terms should be included after the keywords.
+HEADINGS
+Section Headings: 9pt Helvetica (or Arial), bold, flush left, numbered, small caps.
+Subsection Headings: 9pt Helvetica (or Arial), bold, flush left, numbered.
+Sub-subsection Headings: 9pt Helvetica (or Arial), flush left, numbered.
+BODY TEXT
+9pt Times or Times Roman, justified on 10pt leading indent all paragraphs by 1em (roughly 3mm) except the first one under a heading.
+No blank lines between paragraphs.
+CAPTION TEXT
+8pt Helvetica (or Arial)
+Capitalize only the first word of each figure caption.
+Capitalize in sentence case for a table title/caption; try to limit the table captions to a simple title and not a full description.
+Figures and tables must be numbered separately and should be labelled ‘Figure:’ or ‘Table:’ (note the use of a colon not a period).
+Figure captions are to be centered below the figures.
+When the caption expands across multiple lines, it should become flush left.
+Table titles/captions are to be centered above the tables.
+ACKNOWLEDGMENTS
+The word “ACKNOWLEDGEMENTS”: 9pt Helvetica (or Arial), bold, flush left, small caps, and not numbered.
+Body Text: 9pt Times or Times Roman, justified on 10pt leading.
+In the USA, it is spelled ‘acknowledgments’, without the ‘e’ after the ‘g’. Since the IEEE is a USA based society, we would recommend having it spelled ‘acknowledgments’ and have done that in our template. However, for the rest of the world, we will not correct it in conference papers – we also spell it ‘acknowledgements’ with an ‘e’ after the ‘g’.
+CITATIONS AND REFERENCES
+The word “REFERENCES”: 9pt Helvetica (or Arial), bold, flush left, small caps, and not numbered.
+Body Text: 9pt Times or Times Roman, justified on 10pt leading.
+List of references: 8pt Times or Times Roman on 9.5pt leading.
+When referenced in the text, enclose the citation number in square brackets (e.g., [1]).
+Where appropriate, include the name(s) of editors of referenced books. For example:[1] Albert B. Smith, Christopher D. Jones, and Egon F. Roberts, “Article Title”, Journal, Publisher, Location, pp. 1-10, Date.[2] Christopher D. Jones, Albert B. Smith, and Egon F. Roberts, Book Title, Publisher, Location, Date.[3] Christopher D. Jones, Albert B. Smith, and Egon F. Roberts, “Chapter Title”, Book Title, Book Editors, Publisher, Location, Date.

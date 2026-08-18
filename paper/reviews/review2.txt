@@ -1,0 +1,10 @@
+Overall Rating
+Probably accept: I would argue for accepting this submission.
+Expertise
+Knowledgeable
+The Review
+The Choreographic Genome this is a compelling and original paper. The main title is a nice fitting metaphor. The central idea is clear, the technical implementation is coherent, and the writing is strong. The strengths lie in an original research question, clear conceptual framing, good tech description and great integration of visualization literature, overall good methods. The supplemental materials are well-prepared.
+
+The paper offers critical and artistic visualization reflections. The question of what we as humans or the interpretative systems choose to see in a dataset and what we would prefer or should amplify instead, is an interesting philosophical contribution. Biases and ethical issues of training data are amongst the main contemporary worries. There are several works at the moment that try to find innovative structures or new systems of order in datasets and training data. I am a little unsure about how much innovation lies in the AI programmed coding part.
+
+Also, if it really wants to move into the artistic research direction, not just conceptually, it would be essential to work with real performers or dancers. Only then, the outcomes would have any artistic value. At the moment, the generated images and especially the animations on Git are mere visualizations of the code.
