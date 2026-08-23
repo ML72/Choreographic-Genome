@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 import numpy as np
 import torch
@@ -109,9 +110,11 @@ def main():
     parser.add_argument("--pca_num_samples", type=int, default=100_000, help="Number of samples for PCA")
     parser.add_argument("--pca_final_dim", type=int, default=64, help="PCA final projection dimension")
     parser.add_argument("--num_clusters", type=int, default=256, help="Number of KMeans clusters (codebook regions)")
+    parser.add_argument("--region_order", type=str, choices=["pc1", "raw"], default="pc1", help="How region ids are assigned to clusters: pc1 ranks them along the first principal component, raw keeps arbitrary KMeans labels")
     parser.add_argument("--input_index", type=str, default=os.path.join("data", "index", "motion_index.npz"))
     parser.add_argument("--output_path", type=str, default=os.path.join("data", "index", "codebook.npz"))
     parser.add_argument("--smpl_dir", type=str, default=os.path.join("models"))
+    parser.add_argument("--file_prefix", type=str, default=None, help="Build the vocabulary from only the source clips whose file name starts with this prefix (AIST++ encodes genre there, e.g. gJB for ballet jazz). Frames outside the subset are left unassigned.")
     args = parser.parse_args()
     
     print(f"Loading motion index from {args.input_index}...")
@@ -125,6 +128,21 @@ def main():
     smpl_model = smplx.create(args.smpl_dir, model_type="smpl", ext="npz", gender="neutral")
     
     unique_files = np.unique(file_indices)
+
+    # Optionally learn the vocabulary from one slice of the corpus only. This is
+    # what makes a genre-specific instrument possible: everything downstream keys
+    # off the tokens, and frames left at -1 are invisible to the engine, so the
+    # body can only be realized from the chosen slice.
+    if args.file_prefix:
+        names_path = os.path.join(os.path.dirname(args.input_index), "file_names.json")
+        with open(names_path, "r") as f:
+            file_names = json.load(f)
+        unique_files = np.array([fid for fid in unique_files
+                                 if file_names[int(fid)].startswith(args.file_prefix)])
+        print(f"Restricting vocabulary to {len(unique_files)} clips matching prefix '{args.file_prefix}'")
+        if len(unique_files) == 0:
+            print("Error: no clips match that prefix.")
+            return
     
     all_windows = []
     window_frame_indices = []
@@ -189,6 +207,23 @@ def main():
     print("Running MiniBatchKMeans quantization...")
     kmeans = MiniBatchKMeans(n_clusters=args.num_clusters, batch_size=1024, random_state=42)
     labels = kmeans.fit_predict(Z)
+    centroids = kmeans.cluster_centers_
+    
+    # K-Means hands back cluster labels in an arbitrary order, so region 65 would
+    # bear no kinematic relation to region 66. Because the downstream operator maps
+    # byte value b straight onto region b, that arbitrariness would decide the look
+    # of every dance. Ranking the centroids along the first principal component (the
+    # dominant axis of variation in the windowed motion features, and axis 0 of the
+    # PCA basis the centroids live in) makes region id a position on a real kinematic
+    # axis, so nearby byte values name nearby gestures. This is a pure relabeling:
+    # it re-indexes the vocabulary without changing the clustering.
+    region_order = np.argsort(centroids[:, 0]).astype(np.int64)
+    if args.region_order == "raw":
+        region_order = np.arange(args.num_clusters, dtype=np.int64)
+    forward = np.empty(args.num_clusters, dtype=np.int64)   # kmeans label -> region id
+    forward[region_order] = np.arange(args.num_clusters)
+    labels = forward[labels]
+    centroids = centroids[region_order]
     
     # Initialize all frames to -1. The last W-1 frames of any clip will remain as -1
     final_tokens = np.full((num_total_frames,), -1, dtype=np.int32)
@@ -199,11 +234,13 @@ def main():
     np.savez_compressed(
         args.output_path,
         tokens=final_tokens,
-        kmeans_centroids=kmeans.cluster_centers_,
+        kmeans_centroids=centroids,
         pca_components=pca.components_,
         pca_mean=pca.mean_,
         scaler_mean=scaler.mean_,
-        scaler_scale=scaler.scale_
+        scaler_scale=scaler.scale_,
+        region_order=region_order,
+        ordering=np.array(args.region_order)
     )
     print("Done!")
 

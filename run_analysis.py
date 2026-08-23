@@ -8,6 +8,10 @@ import math
 import heapq
 import numpy as np
 import scipy.stats as stats
+from scipy.spatial.distance import pdist, squareform
+from scipy.stats import spearmanr
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.metrics import silhouette_score
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from tqdm import tqdm
@@ -182,7 +186,8 @@ def run_part_1():
                 gender='neutral', 
                 physics_algorithms_on=False, 
                 render_video=False, 
-                verbose=False
+                verbose=False,
+                save_outputs=False
             )
             regions = [int(x) for x in run_data["executed_dna"].split(',') if x.strip()]
             auto_seqs.append(regions)
@@ -225,7 +230,7 @@ def run_part_1():
                 line_to_use = line
                 
             # Run without rendering or physics filtering (for speed of dataset collection)
-            run_data, g_poses, g_trans = generate_motion(num_frames=0, run_name=f"text_{idx}", input_text=line_to_use, render_video=False, physics_algorithms_on=False, verbose=False)
+            run_data, g_poses, g_trans = generate_motion(num_frames=0, run_name=f"text_{idx}", input_text=line_to_use, render_video=False, physics_algorithms_on=False, verbose=False, save_outputs=False)
             regions = [int(x) for x in run_data["executed_dna"].split(',') if x.strip()]
             text_seqs.append(regions)
             
@@ -598,9 +603,13 @@ def run_part_3():
 #    - plot_6_amplification.png        : structural-amplification metrics
 #    - case_studies.txt (+ .json)      : machine-readable metrics
 #
-#  This is intentionally lightweight: it loads ONLY the precomputed plausibility
-#  graph (a few hundred KB), not the multi-GB motion index, so it runs in
-#  seconds.
+#  Two counts of "how much movement" appear below and they are not the same. The
+#  plausibility graph gives a conservative prediction, asking how many bridge
+#  regions it would take to connect each consecutive pair. The engine gives the
+#  actual answer, because at runtime it first tries to reach the next region by
+#  motion matching over every frame in it, and usually succeeds, so it bridges far
+#  less often than the sampled graph predicts. We report the engine's count as the
+#  regions traversed, and keep the graph prediction as a diagnostic.
 # =========================================================================== #
 
 GENOME_CMAP = "turbo"  # high-contrast, perceptually ordered map over region ids 0-255
@@ -650,6 +659,12 @@ CASE_STUDIES = {
 
 # Order controls top-to-bottom placement in the genome figure.
 ORDER = ["canon", "marginalized", "devanagari", "cherokee", "code", "machine", "signal"]
+
+# How many times to generate each text. The engine starts from a randomly chosen
+# frame, so the number of regions it ends up traversing varies a little between
+# runs; averaging over repeats keeps the reported amplification stable rather than
+# a property of one seed. Set to 1 for a quick look, at the cost of that stability.
+CASE_REPEATS = 40
 
 
 def dijkstra_path(graph, start, target):
@@ -726,7 +741,6 @@ def analyze():
 
         n_chars = len(raw)
         n_bytes = len(byte_seq)
-        traversed = n_bytes + bridges             # total regions the body steps through
         records[key] = {
             "category": category,
             "label": label,
@@ -736,14 +750,39 @@ def analyze():
             "n_bytes": n_bytes,
             "unique_regions": len(set(regions)),
             "region_entropy_bits": shannon_entropy(regions),
-            "bridges": bridges,
-            "unreachable": unreachable,
-            "regions_traversed": traversed,
-            # amplification factor: motion regions the body traverses per *character*
-            # of source text. ASCII canon ~1.0+bridges; multibyte scripts amplify.
-            "amplification_per_char": traversed / max(1, n_chars),
+            "graph_bridges": bridges,             # what the sampled graph predicts
+            "graph_unreachable": unreachable,     # pairs it cannot connect at all
+            "graph_regions": n_bytes + bridges,
             "bytes_per_char": n_bytes / max(1, n_chars),
         }
+
+    # Now ask the engine what it actually does, which is what the table reports.
+    # The first run keeps physics on so its frame count matches the rendered
+    # choreography; the repeats only need the region sequence, which physics does
+    # not touch, so they skip it.
+    for key in ORDER:
+        rec = records[key]
+        traversed = []
+        for rep in tqdm(range(CASE_REPEATS), desc=f"  {key}", leave=False):
+            run_data, poses, _ = generate_motion(
+                0, f"case_{key}", input_text=rec["text"], gender="neutral",
+                physics_algorithms_on=(rep == 0), render_video=False, verbose=False,
+                save_outputs=False)
+            executed = [int(x) for x in run_data["executed_dna"].split(",") if x.strip()]
+            traversed.append(len(executed))
+            if rep == 0:
+                rec["frames"] = len(poses)
+                rec["frames_per_char"] = len(poses) / max(1, rec["n_chars"])
+        rec["runs"] = CASE_REPEATS
+        rec["regions_traversed_runs"] = traversed
+        rec["regions_traversed"] = float(np.mean(traversed))
+        rec["regions_traversed_min"] = int(np.min(traversed))
+        rec["regions_traversed_max"] = int(np.max(traversed))
+        rec["runs_without_bridges"] = int(sum(1 for t in traversed if t == rec["n_bytes"]))
+        rec["runtime_bridges"] = rec["regions_traversed"] - rec["n_bytes"]
+        # amplification factor: motion regions the body traverses per *character* of
+        # source text. ASCII sits at ~1.0; multibyte scripts amplify with the encoding.
+        rec["amplification_per_char"] = rec["regions_traversed"] / max(1, rec["n_chars"])
 
     # Pairwise structural divergence of the genomes (determinism + distinctness).
     keys = ORDER
@@ -785,7 +824,7 @@ def plot_genome(records):
                 fontsize=7.5, style="italic", color="#444444", transform=ax.transData)
         # right-hand annotation: regions traversed
         ax.text(len(rec["regions"]) + 0.008 * max_len, 0.5,
-                f"{rec['regions_traversed']} regions",
+                f"{rec['n_bytes']} regions",
                 ha="left", va="center", fontsize=8, color="#222222",
                 transform=ax.transData)
 
@@ -866,10 +905,15 @@ def write_metrics(records, div):
             f.write(f"    bytes / character   : {r['bytes_per_char']:.3f}\n")
             f.write(f"    unique regions      : {r['unique_regions']}\n")
             f.write(f"    region entropy bits : {r['region_entropy_bits']:.3f}\n")
-            f.write(f"    bridge regions      : {r['bridges']}\n")
-            f.write(f"    unreachable (proxy) : {r['unreachable']}\n")
-            f.write(f"    regions traversed   : {r['regions_traversed']}\n")
-            f.write(f"    amplification/char  : {r['amplification_per_char']:.3f}\n\n")
+            f.write(f"    regions traversed   : {r['regions_traversed']:.2f} mean over "
+                    f"{r['runs']} runs (min {r['regions_traversed_min']}, "
+                    f"max {r['regions_traversed_max']})\n")
+            f.write(f"    runs needing no bridge: {r['runs_without_bridges']} of {r['runs']}\n")
+            f.write(f"    frames generated    : {r['frames']}\n")
+            f.write(f"    frames / character  : {r['frames_per_char']:.1f}\n")
+            f.write(f"    amplification/char  : {r['amplification_per_char']:.3f}\n")
+            f.write(f"    graph prediction    : {r['graph_regions']} regions "
+                    f"({r['graph_bridges']} bridges, {r['graph_unreachable']} unreachable pairs)\n\n")
 
         f.write("Pairwise genome divergence (Levenshtein over region sequences)\n")
         f.write("-" * 60 + "\n")
@@ -901,7 +945,8 @@ def run_part_4():
     for k in ORDER:
         r = records[k]
         print(f"  {r['category']:18s} chars={r['n_chars']:3d} bytes={r['n_bytes']:3d} "
-              f"bridges={r['bridges']:3d} traversed={r['regions_traversed']:3d} "
+              f"traversed={r['regions_traversed']:6.2f} over {r['runs']} runs "
+              f"(no bridge in {r['runs_without_bridges']}) "
               f"amp/char={r['amplification_per_char']:.2f} "
               f"entropy={r['region_entropy_bits']:.2f}")
     n = len(ORDER)
@@ -951,13 +996,14 @@ CORPUS = {
 
 TEASER_ORDER = ["canon", "marginalized", "devanagari", "cherokee", "code", "machine", "signal"]
 MONTAGE_KEYS = ["canon", "machine", "cherokee"]  # a deliberately contrasting trio
+TRAIL_KEYS = ["canon", "devanagari", "machine"]  # chronophotographic sweeps, compared
 
 N_KEYS = 6                      # keyframes per row in the montage
 VIEW_W, VIEW_H = 420, 540
 CHAR_COLOR = [0.5, 0.2, 0.8, 1.0]  # neutral purple
 
 
-def build_scene(grid=True):
+def build_scene(grid=True, cam_z=3.0, cam_tilt_deg=-12.0):
     scene = pyrender.Scene(ambient_light=(0.6, 0.6, 0.6), bg_color=[1.0, 1.0, 1.0, 1.0])
     camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
 
@@ -988,16 +1034,18 @@ def build_scene(grid=True):
                                                       metallicFactor=0.0, roughnessFactor=1.0)
         scene.add(pyrender.Mesh.from_trimesh(gridmesh, material=grid_mat, smooth=False))
 
-    cam_pose = np.eye(4) @ tra.rotation_matrix(np.radians(-12), [1, 0, 0])
+    cam_pose = np.eye(4) @ tra.rotation_matrix(np.radians(cam_tilt_deg), [1, 0, 0])
     cam_pose[1, 3] = 0.9
-    cam_pose[2, 3] = 3.0
+    cam_pose[2, 3] = cam_z
     scene.add(camera, pose=cam_pose)
     return scene
 
 
-def render_keyframes(poses, trans, indices, body_model, color, grid=True):
-    scene = build_scene(grid=grid)
-    renderer = pyrender.OffscreenRenderer(viewport_width=VIEW_W, viewport_height=VIEW_H)
+def render_keyframes(poses, trans, indices, body_model, color, grid=True,
+                     cam_z=3.0, cam_tilt_deg=-12.0, view_w=None, view_h=None):
+    scene = build_scene(grid=grid, cam_z=cam_z, cam_tilt_deg=cam_tilt_deg)
+    renderer = pyrender.OffscreenRenderer(viewport_width=view_w or VIEW_W,
+                                          viewport_height=view_h or VIEW_H)
     mat = pyrender.MetallicRoughnessMaterial(baseColorFactor=color, metallicFactor=0.2,
                                              roughnessFactor=0.6, doubleSided=True)
     imgs = []
@@ -1014,6 +1062,36 @@ def render_keyframes(poses, trans, indices, body_model, color, grid=True):
         imgs.append(color_img[..., :3])
     renderer.delete()
     return imgs
+
+
+def crop_to_content(imgs, pad=34):
+    """Trim the same empty margin off every image in the vocabulary comparison.
+
+    The camera has to be framed wide enough for the tallest jump in any sequence,
+    which leaves most keyframes floating in whitespace and floor. We locate the
+    bodies by saturation, since they are the only strongly colored thing in the
+    scene, then crop every image to the union of those regions plus a margin. That
+    keeps the floor grid visible around the dancer while dropping the empty half of
+    the frame, and it keeps all the bodies at one scale, which matters because the
+    figure is read as a comparison. The teaser and montage deliberately do not use
+    this, so that their framing matches earlier versions of the figures.
+    """
+    if not imgs:
+        return imgs
+    mask = np.zeros(imgs[0].shape[:2], dtype=bool)
+    for img in imgs:
+        a = img.astype(np.int16)
+        mask |= (a.max(axis=2) - a.min(axis=2)) > 25          # colored, i.e. body
+    if not mask.any():
+        for img in imgs:
+            mask |= (img.astype(np.int16).min(axis=2) < 245)  # fall back to any ink
+    rows = np.where(mask.any(axis=1))[0]
+    cols = np.where(mask.any(axis=0))[0]
+    if not len(rows) or not len(cols):
+        return imgs
+    r0, r1 = max(0, rows[0] - pad), min(mask.shape[0], rows[-1] + pad + 1)
+    c0, c1 = max(0, cols[0] - pad), min(mask.shape[1], cols[-1] + pad + 1)
+    return [img[r0:r1, c0:c1] for img in imgs]
 
 
 def pick_expressive_frame(poses, trans, body_model):
@@ -1081,19 +1159,24 @@ def render_montage(motions, body_model):
     print(f"Saved {out}")
 
 
-def render_trail(motions, body_model, key, out_name):
+def render_trail_canvas(motions, body_model, key, n_frames=24, step_px=82, W=700, H=680):
     """A chronophotographic 'motion study': sample one dance across time, spread
     the frames left to right, color them by moment, and composite them into a
     single long-exposure sweep. The whole image is produced from the byte
-    structure of one text."""
+    structure of one text. Returns the cropped canvas so several texts can be
+    stacked into one comparison figure.
+
+    Each body is rendered on the camera axis and then composited at a pixel offset
+    of step_px, rather than being placed at its own world-x inside one very wide
+    perspective view. In a single wide view the bodies near the edges of the frame
+    are seen far off-axis, and rectilinear perspective stretches them sideways, so
+    the ends of each sweep came out visibly broader than the middle. Rendering every
+    body centered gives them all an identical projection.
+    """
     register, sublabel, tlabel, poses, trans = motions[key]
     n = len(poses)
-    n_frames = 14
     lo, hi = int(n * 0.08), int(n * 0.92)
     idxs = np.linspace(lo, max(lo + 1, hi), n_frames).astype(int)
-    spread = 3.8
-    xs = np.linspace(-spread / 2.0, spread / 2.0, n_frames)
-    W, H = 1800, 640
 
     scene = pyrender.Scene(ambient_light=(0.6, 0.6, 0.6), bg_color=[1.0, 1.0, 1.0, 0.0])
     key_light = pyrender.DirectionalLight(color=[1.0, 0.95, 0.9], intensity=2.5)
@@ -1112,8 +1195,9 @@ def render_trail(motions, body_model, key, out_name):
     scene.add(camera, pose=cam_pose)
 
     renderer = pyrender.OffscreenRenderer(viewport_width=W, viewport_height=H)
+    plt.close("all")
     cmap = plt.get_cmap("turbo")
-    canvas = np.ones((H, W, 3), dtype=float)
+    canvas = np.ones((H, (n_frames - 1) * step_px + W, 3), dtype=float)
     for i, idx in enumerate(idxs):
         col = cmap(0.08 + 0.84 * i / (n_frames - 1))
         mat = pyrender.MetallicRoughnessMaterial(
@@ -1121,7 +1205,7 @@ def render_trail(motions, body_model, key, out_name):
             metallicFactor=0.2, roughnessFactor=0.6, doubleSided=True)
         p = torch.tensor(np.asarray(poses[idx:idx + 1]), dtype=torch.float32)
         y = float(np.asarray(trans[idx])[1])
-        transl = torch.tensor([[float(xs[i]), y, 0.0]], dtype=torch.float32)
+        transl = torch.tensor([[0.0, y, 0.0]], dtype=torch.float32)   # on the camera axis
         out = body_model(global_orient=p[:, :3], body_pose=p[:, 3:], transl=transl)
         verts = out.vertices.detach().cpu().numpy().squeeze()
         mesh = trimesh.Trimesh(verts, body_model.faces)
@@ -1132,7 +1216,9 @@ def render_trail(motions, body_model, key, out_name):
         alpha = (rgba[..., 3].astype(float) / 255.0)[..., None]
         weight = 0.30 + 0.70 * (i / (n_frames - 1))
         alpha = alpha * weight
-        canvas = canvas * (1.0 - alpha) + rgb * alpha
+        x0 = i * step_px
+        strip = canvas[:, x0:x0 + W]
+        canvas[:, x0:x0 + W] = strip * (1.0 - alpha) + rgb * alpha
     renderer.delete()
 
     canvas = np.clip(canvas, 0.0, 1.0)
@@ -1141,13 +1227,34 @@ def render_trail(motions, body_model, key, out_name):
     rows = np.where(mask.any(axis=1))[0]
     cols = np.where(mask.any(axis=0))[0]
     if len(rows) and len(cols):
-        pad = 25
+        pad = 18
         r0, r1 = max(0, rows[0] - pad), min(canvas.shape[0], rows[-1] + pad)
         c0, c1 = max(0, cols[0] - pad), min(canvas.shape[1], cols[-1] + pad)
         canvas = canvas[r0:r1, c0:c1]
-    fig = plt.figure(figsize=(canvas.shape[1] / 220.0, canvas.shape[0] / 220.0))
-    ax = fig.add_axes([0, 0, 1, 1]); ax.imshow(canvas); ax.axis("off")
-    fig.savefig(f"results/plots/{out_name}", dpi=220)
+    return canvas
+
+
+def render_trail_comparison(motions, body_model, keys, out_name):
+    """Stack one chronophotographic sweep per text, so the structural difference
+    between the texts is legible as a difference between three motion studies
+    rather than asserted about a single one."""
+    canvases = [render_trail_canvas(motions, body_model, k) for k in keys]
+    heights = [c.shape[0] / c.shape[1] for c in canvases]   # normalized to width 1
+    fig = plt.figure(figsize=(11.0, 11.0 * sum(heights) * 1.06))
+    gs = gridspec.GridSpec(len(keys), 1, height_ratios=heights, hspace=0.06,
+                           left=0.003, right=0.997, top=0.997, bottom=0.003)
+    for row, (key, canvas) in enumerate(zip(keys, canvases)):
+        ax = fig.add_subplot(gs[row])
+        ax.imshow(canvas)
+        ax.set_xticks([]); ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        register, sublabel, tlabel, _, _ = motions[key]
+        ax.text(0.004, 0.955, register, transform=ax.transAxes, ha="left", va="top",
+                fontsize=11.5)
+        ax.text(0.004, 0.845, sublabel, transform=ax.transAxes, ha="left", va="top",
+                fontsize=8.5, style="italic", color="#444444")
+    fig.savefig(f"results/plots/{out_name}", dpi=200, bbox_inches="tight")
     plt.close()
     print(f"Saved results/plots/{out_name}")
 
@@ -1172,12 +1279,620 @@ def run_part_5():
 
     render_teaser(motions, body_model)
     render_montage(motions, body_model)
-    render_trail(motions, body_model, "devanagari", "plot_9_trail.png")
+    render_trail_comparison(motions, body_model, TRAIL_KEYS, "plot_9_trail.png")
 
+
+
+# =========================================================================== #
+#  Part 6: Instrument Ablations
+# --------------------------------------------------------------------------- #
+#  Three questions a reader can reasonably ask of an instrument whose whole
+#  method is "byte value b names motion region b":
+#
+#    (a) Does the labeling matter? K-Means hands back clusters in an arbitrary
+#        order, so on its own, region 65 has no kinematic relation to region 66.
+#        We rank the centroids along the first principal component instead; this
+#        measures what that ordering buys, against the arbitrary baseline and
+#        against two other candidate orderings.
+#    (b) Is 256 regions a good partition of the motion space, or only a
+#        convenient one? K is fixed by the encoding (one region per byte value),
+#        not chosen to fit the data, so we sweep K and report the cost.
+#    (c) Are genomes distinct over a corpus larger than the seven case studies?
+#        The case-study numbers are illustrative; this is the population version.
+#
+#  Everything here is cheap: (a) and (c) touch only the codebook, the graph and
+#  the text corpus, and (b) re-derives features for a random subsample of clips.
+#
+#  Writes results/metrics/ablations.txt (+ .json) and plot_10_ablations.png.
+# =========================================================================== #
+
+EVAL_TEXT_GLOB = os.path.join("data", "eval_text", "*.txt")
+
+
+def load_codebook_geometry(codebook_path=os.path.join("data", "index", "codebook.npz")):
+    """Centroids in the current (PC1-ordered) labeling, plus the permutation
+    back to the arbitrary K-Means labels the clustering originally produced."""
+    data = np.load(codebook_path)
+    centroids = data["kmeans_centroids"].astype(np.float64)
+    n = len(centroids)
+    region_order = data["region_order"] if "region_order" in data.files else np.arange(n)
+    # forward[kmeans label] = current region id
+    forward = np.empty(n, dtype=np.int64)
+    forward[np.asarray(region_order)] = np.arange(n)
+    return centroids, forward
+
+
+def candidate_orderings(centroids, forward):
+    """byte value -> region id, under four ways of indexing the same vocabulary.
+
+    Each is a permutation of the identical 256 gestures; they differ only in
+    which byte value names which gesture.
+    """
+    n = len(centroids)
+    D = squareform(pdist(centroids))
+
+    # Arbitrary K-Means labels: byte b names whatever cluster happened to be
+    # labelled b during quantization.
+    raw = forward.copy()
+
+    # Adopted: regions already carry PC1 rank, so byte b names region b.
+    pc1 = np.arange(n, dtype=np.int64)
+
+    # Fiedler vector of a Gaussian affinity graph: a nonlinear 1-D layout.
+    sigma = np.median(D[np.triu_indices(n, 1)])
+    W = np.exp(-(D ** 2) / (2 * sigma ** 2))
+    np.fill_diagonal(W, 0.0)
+    deg = np.diag(W.sum(1))
+    inv_sqrt = np.diag(1.0 / np.sqrt(np.diag(deg)))
+    _, vecs = np.linalg.eigh(inv_sqrt @ (deg - W) @ inv_sqrt)
+    spectral = np.argsort(vecs[:, 1]).astype(np.int64)
+
+    # Greedy nearest-neighbor walk: minimizes local jumps, ignores global order.
+    start = int(np.argmin(centroids[:, 0]))
+    unvisited, path = set(range(n)) - {start}, [start]
+    while unvisited:
+        last = path[-1]
+        nxt = min(unvisited, key=lambda j: D[last, j])
+        path.append(nxt)
+        unvisited.discard(nxt)
+    greedy = np.array(path, dtype=np.int64)
+
+    return {"Arbitrary (K-Means labels)": raw, "PC1 rank (adopted)": pc1,
+            "Spectral (Fiedler)": spectral, "Greedy nearest-neighbor": greedy}, D
+
+
+def bridge_cost(graph, cache, a, b):
+    """Bridges the plausibility graph must insert to get from region a to b, or
+    None when no path exists. Memoized: a corpus reuses the same few dozen byte
+    values endlessly, so the same query recurs thousands of times."""
+    key = (a, b)
+    if key not in cache:
+        path = dijkstra_path(graph, a, b)
+        cache[key] = (len(path) - 1) if path else None
+    return cache[key]
+
+
+def reachability_by_byte_class(sigma_map, graph):
+    """Which parts of an encoding land on well-connected ground?
+
+    The plausibility graph is denser in the middle of the motion space than at its
+    extremes, so an ordering decides which byte values get gestures the body can
+    easily enter and leave. Reported as the percentage of ordered pairs within a
+    byte class that the graph cannot connect at all, which forces the engine to
+    substitute a nearest reachable gesture instead of bridging.
+    """
+    classes = {
+        "alphanumeric": [ord(c) for c in
+                         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+        "ASCII space and punctuation": [b for b in range(32, 127) if not chr(b).isalnum()],
+        "UTF-8 continuation (0x80-0xBF)": list(range(128, 192)),
+        "all 256 byte values": list(range(256)),
+    }
+    out = {}
+    for label, byte_values in classes.items():
+        regions = [int(sigma_map[b]) for b in byte_values]
+        unreachable = total = 0
+        for src in regions:
+            seen, stack = {src}, [src]
+            while stack:                       # reachable set, one pass per source
+                node = stack.pop()
+                for nxt in graph.get(node, {}):
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            for dst in regions:
+                if src != dst:
+                    total += 1
+                    unreachable += dst not in seen
+        out[label] = 100.0 * unreachable / max(1, total)
+    return out
+
+
+def ordering_metrics(name, sigma_map, D, graph, corpus_bytes, cache):
+    """Score one byte->region indexing.
+
+    rho          how strongly byte distance tracks kinematic distance (0 = the
+                 byte value tells you nothing about the movement it names)
+    adjacent     mean kinematic distance between consecutive byte values
+    step         mean kinematic distance the corpus actually asks the body to
+                 travel between one byte and the next
+    bridges      bridge regions the plausibility graph must insert per corpus
+                 transition to keep those steps physically performable
+    """
+    n = len(sigma_map)
+    iu = np.triu_indices(n, 1)
+    byte_dist = np.abs(iu[0] - iu[1]).astype(float)
+    kin_dist = D[sigma_map[iu[0]], sigma_map[iu[1]]]
+    rho = float(spearmanr(byte_dist, kin_dist).statistic)
+    adjacent = float(np.mean(D[sigma_map[:-1], sigma_map[1:]]))
+
+    steps, bridges, transitions, unreachable = [], 0, 0, 0
+    for byte_seq in corpus_bytes:
+        regions = [int(sigma_map[b]) for b in byte_seq]
+        for a, b in zip(regions[:-1], regions[1:]):
+            if a == b:
+                continue
+            transitions += 1
+            steps.append(D[a, b])
+            cost = bridge_cost(graph, cache, a, b)
+            if cost is None:
+                unreachable += 1
+            else:
+                bridges += cost
+
+    return {
+        "ordering": name,
+        "spearman_rho": rho,
+        "adjacent_centroid_distance": adjacent,
+        "corpus_step_distance": float(np.mean(steps)) if steps else 0.0,
+        "bridges_per_transition": bridges / max(1, transitions),
+        "unreachable_per_transition": unreachable / max(1, transitions),
+    }
+
+
+def read_eval_lines(min_len=8):
+    """The held-out text corpus (song lyrics, poems, quotes and jokes) that the
+    quantitative claims are measured over, as opposed to the seven curated
+    case-study texts."""
+    lines = []
+    for path in sorted(glob.glob(EVAL_TEXT_GLOB)):
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if len(line) >= min_len:
+                    lines.append(line)
+    return lines
+
+
+def run_ordering_ablation(graph, out):
+    centroids, forward = load_codebook_geometry()
+    orderings, D = candidate_orderings(centroids, forward)
+
+    case_bytes = [list(CASE_STUDIES[k][2].strip().encode("utf-8")) for k in ORDER]
+    eval_lines = read_eval_lines()
+    random.shuffle(eval_lines)
+    held_out_bytes = [list(l.encode("utf-8")) for l in eval_lines[:150]]
+
+    results = {}
+    caches = {name: {} for name in orderings}
+    for corpus_name, corpus in [("case studies", case_bytes), ("held-out corpus", held_out_bytes)]:
+        rows = [ordering_metrics(name, sigma, D, graph, corpus, caches[name])
+                for name, sigma in orderings.items()]
+        results[corpus_name] = rows
+        out.write(f"\nRegion ordering ablation, measured over the {corpus_name} "
+                  f"({len(corpus)} texts)\n")
+        out.write("-" * 96 + "\n")
+        out.write(f"{'byte -> region indexing':32s}{'rho':>9}{'adj. dist':>11}"
+                  f"{'step dist':>11}{'bridges/tr':>12}{'unreach/tr':>12}\n")
+        for r in rows:
+            out.write(f"{r['ordering']:32s}{r['spearman_rho']:+9.4f}"
+                      f"{r['adjacent_centroid_distance']:11.2f}{r['corpus_step_distance']:11.2f}"
+                      f"{r['bridges_per_transition']:12.3f}{r['unreachable_per_transition']:12.3f}\n")
+        out.flush()
+
+    # An ordering cannot change how connected the graph is overall, only which
+    # byte values sit on the connected part of it. Both facts are worth seeing.
+    reach = {name: reachability_by_byte_class(sigma, graph) for name, sigma in orderings.items()}
+    labels = list(next(iter(reach.values())).keys())
+    out.write("\nUnreachable region pairs by byte class (%), which the engine must "
+              "resolve by proxy substitution\n")
+    out.write("-" * 96 + "\n")
+    out.write(f"{'byte -> region indexing':32s}" + "".join(f"{l[:15]:>16}" for l in labels) + "\n")
+    for name in orderings:
+        out.write(f"{name:32s}" + "".join(f"{reach[name][l]:15.2f}%" for l in labels) + "\n")
+    results["reachability"] = reach
+    return results
+
+
+def run_k_sweep(out, n_clips=90, k_values=(16, 32, 64, 128, 256, 512, 1024), window_length=20):
+    """Re-derive the 64-D motion embedding for a random subsample of clips and ask
+    how well K regions partition it, for K around the 256 the encoding forces."""
+    from create_codebook import compute_features, create_windows
+
+    index = np.load(os.path.join("data", "index", "motion_index.npz"))
+    poses, trans, file_indices = index["poses"], index["trans"], index["file_indices"]
+    cb = np.load(os.path.join("data", "index", "codebook.npz"))
+    scaler_mean, scaler_scale = cb["scaler_mean"], cb["scaler_scale"]
+    pca_mean, pca_components = cb["pca_mean"], cb["pca_components"]
+
+    smpl_model = smplx.create("models", model_type="smpl", ext="npz", gender="neutral")
+    unique_files = np.unique(file_indices)
+    rng = np.random.RandomState(42)
+    chosen = rng.choice(unique_files, min(n_clips, len(unique_files)), replace=False)
+
+    windows = []
+    for fid in tqdm(chosen, desc="K-sweep features", mininterval=10.0):
+        mask = file_indices == fid
+        if mask.sum() < window_length:
+            continue
+        feats = compute_features(torch.from_numpy(poses[mask]).float(),
+                                 torch.from_numpy(trans[mask]).float(), smpl_model)
+        windows.append(create_windows(feats, window_length).astype(np.float32))
+    X = np.concatenate(windows, axis=0)
+    del windows
+    scaler_mean = scaler_mean.astype(np.float32)
+    scaler_scale = scaler_scale.astype(np.float32)
+    pca_mean = pca_mean.astype(np.float32)
+    pca_t = np.ascontiguousarray(pca_components.T.astype(np.float32))
+    Z = np.empty((len(X), pca_t.shape[1]), dtype=np.float32)
+    for i in range(0, len(X), 20000):
+        chunk = (X[i:i + 20000] - scaler_mean) / scaler_scale
+        Z[i:i + 20000] = (chunk - pca_mean) @ pca_t
+    del X
+
+    total_var = float(np.var(Z, axis=0).sum())
+    pc1_share = float(np.var(Z[:, 0]) / total_var)
+
+    sub = Z[rng.choice(len(Z), min(20000, len(Z)), replace=False)]
+    rows = []
+    for k in k_values:
+        km = MiniBatchKMeans(n_clusters=k, batch_size=1024, random_state=42, n_init=3)
+        labels = km.fit_predict(Z)
+        # Distortion per frame, normalized by the spread of the space, so the
+        # numbers are readable as "fraction of variance still unexplained".
+        distortion = float(km.inertia_ / len(Z) / total_var)
+        sil = float(silhouette_score(sub, km.predict(sub), sample_size=5000, random_state=42))
+        rows.append({"k": int(k), "distortion": distortion, "silhouette": sil})
+        out.write(f"  K = {k:5d}   residual distortion = {distortion:.4f}   silhouette = {sil:+.4f}\n")
+        out.flush()
+        print(f"    K={k} done", flush=True)
+
+    return {"frames": int(len(Z)), "clips": int(len(chosen)), "pc1_variance_share": pc1_share,
+            "sweep": rows}
+
+
+def run_corpus_distinctness(out, n_pairs=20000):
+    """Genome distinctness over the whole held-out corpus rather than seven texts."""
+    lines = read_eval_lines()
+    genomes = [list(l.encode("utf-8")) for l in lines]
+    rng = random.Random(42)
+
+    seen = {}
+    for l, g in zip(lines, genomes):
+        seen.setdefault(tuple(g), set()).add(l)
+    collisions = sum(1 for g, texts in seen.items() if len(texts) > 1)
+
+    raw, norm = [], []
+    for _ in range(n_pairs):
+        i, j = rng.sample(range(len(genomes)), 2)
+        d = levenshtein(genomes[i], genomes[j])
+        raw.append(d)
+        norm.append(d / max(len(genomes[i]), len(genomes[j])))
+
+    stats_out = {
+        "texts": len(lines),
+        "pairs_sampled": n_pairs,
+        "mean_edit_distance": float(np.mean(raw)),
+        "median_edit_distance": float(np.median(raw)),
+        "mean_normalized_edit_distance": float(np.mean(norm)),
+        "p05_normalized_edit_distance": float(np.percentile(norm, 5)),
+        "distinct_genomes": len(seen),
+        "colliding_genomes": collisions,
+        "mean_length": float(np.mean([len(g) for g in genomes])),
+    }
+    out.write(f"\nGenome distinctness over the held-out corpus\n")
+    out.write("-" * 96 + "\n")
+    out.write(f"  texts                        : {stats_out['texts']}\n")
+    out.write(f"  distinct genomes             : {stats_out['distinct_genomes']}"
+              f" ({stats_out['colliding_genomes']} shared by more than one text)\n")
+    out.write(f"  mean genome length (bytes)   : {stats_out['mean_length']:.1f}\n")
+    out.write(f"  sampled pairs                : {stats_out['pairs_sampled']}\n")
+    out.write(f"  mean edit distance           : {stats_out['mean_edit_distance']:.2f}\n")
+    out.write(f"  median edit distance         : {stats_out['median_edit_distance']:.2f}\n")
+    out.write(f"  mean normalized edit distance: {stats_out['mean_normalized_edit_distance']:.3f}\n")
+    out.write(f"  5th pct normalized distance  : {stats_out['p05_normalized_edit_distance']:.3f}\n")
+    return stats_out
+
+
+def plot_ablations(ordering_rows, k_stats, dist_stats):
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4.2))
+
+    names = [r["ordering"] for r in ordering_rows]
+    rhos = [r["spearman_rho"] for r in ordering_rows]
+    colors = ["#bbbbbb" if "Arbitrary" in n else ("#d62728" if "adopted" in n else "#9ecae1") for n in names]
+    y = np.arange(len(names))[::-1]
+    ax1.barh(y, rhos, color=colors, edgecolor="white")
+    ax1.axvline(0, color="#444", linewidth=0.8)
+    ax1.set_yticks(y)
+    ax1.set_yticklabels([n.replace(" (", "\n(") for n in names], fontsize=8)
+    ax1.set_xlabel("Spearman correlation: byte distance vs. kinematic distance", fontsize=9)
+    ax1.set_title("Does the byte value mean anything kinematically?", fontsize=10)
+    for s in ["top", "right"]:
+        ax1.spines[s].set_visible(False)
+
+    ks = [r["k"] for r in k_stats["sweep"]]
+    ax2.plot(ks, [r["distortion"] for r in k_stats["sweep"]], "o-", color="#1f77b4", label="residual distortion")
+    ax2.set_xscale("log", base=2)
+    ax2.set_xlabel("Number of regions K", fontsize=9)
+    ax2.set_ylabel("Residual distortion (fraction of variance)", fontsize=9)
+    ax2b = ax2.twinx()
+    ax2b.plot(ks, [r["silhouette"] for r in k_stats["sweep"]], "s--", color="#ff7f0e", label="silhouette")
+    ax2b.set_ylabel("Silhouette", fontsize=9)
+    ax2.axvline(256, color="#d62728", linewidth=1.2, linestyle=":")
+    ax2.annotate("K = 256\n(set by the encoding)", (256, ax2.get_ylim()[1]), xytext=(-6, -28),
+                 textcoords="offset points", ha="right", fontsize=8, color="#d62728")
+    ax2.set_title("No natural K: the motion space degrades smoothly", fontsize=10)
+    for s in ["top"]:
+        ax2.spines[s].set_visible(False)
+
+    ax3.axis("off")
+    lines = [
+        "Held-out corpus (lyrics, poems, quotes)",
+        "",
+        f"texts                {dist_stats['texts']}",
+        f"distinct genomes     {dist_stats['distinct_genomes']}",
+        f"pairs sampled        {dist_stats['pairs_sampled']}",
+        f"mean edit distance   {dist_stats['mean_edit_distance']:.1f}",
+        f"mean normalized      {dist_stats['mean_normalized_edit_distance']:.3f}",
+        f"5th pct normalized   {dist_stats['p05_normalized_edit_distance']:.3f}",
+    ]
+    ax3.text(0.0, 0.95, "\n".join(lines), va="top", ha="left", fontsize=10, family="monospace")
+    ax3.set_title("Every text keeps its own body", fontsize=10, loc="left")
+
+    plt.tight_layout()
+    out = os.path.join("results", "plots", "plot_10_ablations.png")
+    plt.savefig(out, dpi=200)
+    plt.close()
+    print(f"Saved {out}")
+
+
+def run_part_6():
+    print("Running Part 6: Instrument Ablations", flush=True)
+    graph_path = os.path.join("data", "index", "plausibility_graph.pkl")
+    with open(graph_path, "rb") as f:
+        graph = pickle.load(f)
+
+    os.makedirs(os.path.join("results", "metrics"), exist_ok=True)
+    out_path = os.path.join("results", "metrics", "ablations.txt")
+    with open(out_path, "w", encoding="utf-8") as out:
+        out.write("Instrument Ablations\n")
+        out.write("=" * 96 + "\n")
+
+        print("  [1/3] region ordering", flush=True)
+        ordering_results = run_ordering_ablation(graph, out)
+        out.flush()
+
+        print("  [2/3] held-out corpus distinctness", flush=True)
+        dist_stats = run_corpus_distinctness(out)
+        out.flush()
+
+        print("  [3/3] K sweep (slow: re-derives motion features)", flush=True)
+        out.write("\nHow well does K regions partition the motion space?\n")
+        out.write("-" * 96 + "\n")
+        out.flush()
+        k_stats = run_k_sweep(out)
+        out.write(f"  first principal component explains {k_stats['pc1_variance_share'] * 100:.1f}% "
+                  f"of the variance of the 64-D embedding "
+                  f"({k_stats['frames']} windows from {k_stats['clips']} clips)\n")
+
+    print(f"Saved {out_path}")
+
+    payload = {"ordering": ordering_results, "k_sweep": k_stats, "distinctness": dist_stats}
+    with open(os.path.join("results", "metrics", "ablations.json"), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    plot_ablations(ordering_results["case studies"], k_stats, dist_stats)
+
+
+# =========================================================================== #
+#  Part 7: Vocabulary Ablation
+# --------------------------------------------------------------------------- #
+#  The instrument is two separable things: an operator (byte -> region) and a
+#  vocabulary (what a region physically is). The operator is fixed by the
+#  encoding and carries no cultural content of its own; the vocabulary is learned
+#  from a dance corpus and carries all of it. This part holds the operator fixed
+#  and swaps the vocabulary, so the same text is danced twice by two
+#  differently-trained bodies, and reports how much of the result belongs to
+#  which half.
+#
+#  The alternate vocabulary is quantized from a single AIST++ genre, which means
+#  its own PCA basis, its own 256 clusters and its own plausibility graph. Build
+#  it once (roughly half an hour, mostly the graph):
+#
+#    python create_codebook.py --file_prefix gJB \
+#        --output_path data/index/codebook_gJB.npz
+#    python create_plausibilities.py --input_codebook data/index/codebook_gJB.npz \
+#        --output_path data/index/plausibility_graph_gJB.pkl
+#
+#  Writes results/metrics/vocabulary_ablation.txt (+ .json) and
+#  plot_11_vocabulary.png.
+# =========================================================================== #
+
+# label -> (codebook path, plausibility graph path). The first entry is the
+# instrument as reported everywhere else in the paper.
+VOCABULARIES = [
+    ("Full AIST++ (10 genres)", os.path.join("data", "index", "codebook.npz"),
+     os.path.join("data", "index", "plausibility_graph.pkl")),
+    ("Ballet jazz only (gJB)", os.path.join("data", "index", "codebook_gJB.npz"),
+     os.path.join("data", "index", "plausibility_graph_gJB.pkl")),
+]
+
+VOCAB_TEXT_KEYS = ["canon", "marginalized", "devanagari", "cherokee", "code", "machine", "signal"]
+VOCAB_RENDER_KEYS = ["canon"]   # rendered under both vocabularies in the figure
+VOCAB_N_KEYS = 5
+VOCAB_COLORS = [[0.5, 0.2, 0.8, 1.0], [0.10, 0.55, 0.45, 1.0]]
+
+# The montage camera crops a raised arm, which street dance rarely has and ballet
+# jazz frequently does, so this figure pulls the camera back and tilts it less. The
+# taller viewport keeps the body at roughly the montage's pixel height.
+VOCAB_VIEW_W, VOCAB_VIEW_H = 460, 640
+VOCAB_CAM_Z, VOCAB_CAM_TILT = 3.6, -7.0
+
+# Shorter than the montage caption, which has room for the full citation.
+VOCAB_TEXT_LABEL = {"canon": "Shakespeare Sonnet"}
+
+
+def vocabulary_stats(codebook_path, graph_path):
+    """Coverage of a vocabulary: how much of the corpus it was quantized from and
+    how connected the resulting gesture space is."""
+    cb = np.load(codebook_path)
+    tokens = cb["tokens"]
+    with open(graph_path, "rb") as f:
+        graph = pickle.load(f)
+    n_regions = len(cb["kmeans_centroids"])
+    edges = sum(len(v) for v in graph.values())
+    return {
+        "regions": int(n_regions),
+        "frames_quantized": int((tokens != -1).sum()),
+        "frames_total": int(len(tokens)),
+        "graph_density": edges / max(1, n_regions * (n_regions - 1)),
+        "ordering": str(cb["ordering"]) if "ordering" in cb.files else "raw",
+    }
+
+
+def motion_descriptors(poses, trans, body_model, stride=4):
+    """Cheap, interpretable descriptors of a generated dance: how fast it moves,
+    how far the limbs reach from the pelvis, and how much ground it covers."""
+    poses = np.asarray(poses, dtype=np.float32)
+    trans = np.asarray(trans, dtype=np.float32)
+    energy = float(np.mean(np.sum(np.diff(poses, axis=0) ** 2, axis=1)
+                           + np.sum(np.diff(trans, axis=0) ** 2, axis=1)))
+    idx = np.arange(0, len(poses), stride)
+    p = torch.tensor(poses[idx], dtype=torch.float32)
+    with torch.no_grad():
+        out = body_model(global_orient=p[:, :3], body_pose=p[:, 3:],
+                         transl=torch.zeros((len(idx), 3), dtype=torch.float32))
+    joints = out.joints.detach().cpu().numpy()
+    extension = float(np.mean(np.linalg.norm(joints - joints[:, :1], axis=2).sum(axis=1)))
+    travel = float(np.sum(np.linalg.norm(np.diff(trans[:, [0, 2]], axis=0), axis=1)))
+    return {"frames": int(len(poses)), "kinetic_energy": energy,
+            "limb_extension": extension, "ground_travel": travel}
+
+
+def run_part_7():
+    print("Running Part 7: Vocabulary Ablation")
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+    missing = [p for _, cb, gp in VOCABULARIES for p in (cb, gp) if not os.path.exists(p)]
+    if missing:
+        print("  Skipping: the alternate vocabulary has not been built yet.")
+        for m in missing:
+            print(f"    missing {m}")
+        print("  Build it with the two commands in the Part 7 header comment.")
+        return
+
+    np.random.seed(7)
+    body_model = smplx.create("models", model_type="smpl", gender="neutral", batch_size=1)
+
+    records = {}
+    motions = {}
+    for label, cb_path, graph_path in VOCABULARIES:
+        info = vocabulary_stats(cb_path, graph_path)
+        print(f"  {label}: {info['regions']} regions over {info['frames_quantized']} frames, "
+              f"graph density {info['graph_density']:.3f}")
+        per_text = {}
+        for key in VOCAB_TEXT_KEYS:
+            register, sublabel, tlabel, text = CORPUS[key]
+            run_data, poses, trans = generate_motion(
+                0, f"vocab_{key}", input_text=text, gender="neutral",
+                physics_algorithms_on=True, render_video=False, verbose=False,
+                codebook_path=cb_path, graph_path=graph_path, save_outputs=False)
+            executed = [int(x) for x in run_data["executed_dna"].split(",") if x.strip()]
+            desc = motion_descriptors(poses, trans, body_model)
+            desc["regions_traversed"] = len(executed)
+            desc["bytes"] = len(text.strip().encode("utf-8"))
+            per_text[key] = desc
+            if key in VOCAB_RENDER_KEYS:
+                motions[(label, key)] = (poses, trans)
+            print(f"    {sublabel:24s} frames={desc['frames']:5d} regions={desc['regions_traversed']:4d} "
+                  f"energy={desc['kinetic_energy']:.4f} extension={desc['limb_extension']:.2f}")
+        records[label] = {"vocabulary": info, "texts": per_text}
+
+    # --- figure: the same text, danced by two differently-trained bodies ---
+    rows = [(label, key) for key in VOCAB_RENDER_KEYS for label, _, _ in VOCABULARIES]
+    flat = []
+    for label, key in rows:
+        poses, trans = motions[(label, key)]
+        n = len(poses)
+        lo, hi = int(n * 0.06), int(n * 0.94)
+        indices = np.linspace(lo, max(lo + 1, hi), VOCAB_N_KEYS).astype(int)
+        color = VOCAB_COLORS[[l for l, _, _ in VOCABULARIES].index(label)]
+        flat.extend(render_keyframes(poses, trans, indices, body_model, color, grid=True,
+                                     cam_z=VOCAB_CAM_Z, cam_tilt_deg=VOCAB_CAM_TILT,
+                                     view_w=VOCAB_VIEW_W, view_h=VOCAB_VIEW_H))
+
+    # Cropped as one block: the two vocabularies are only comparable at one scale.
+    flat = crop_to_content(flat, pad=12)
+    grid = [flat[i * VOCAB_N_KEYS:(i + 1) * VOCAB_N_KEYS] for i in range(len(rows))]
+    cell_h, cell_w = grid[0][0].shape[:2]
+    fig, axes = plt.subplots(len(rows), VOCAB_N_KEYS,
+                             figsize=(VOCAB_N_KEYS * 1.85,
+                                      len(rows) * 1.85 * cell_h / cell_w + 0.3),
+                             gridspec_kw={"hspace": 0.02, "wspace": 0.02})
+    for r, (label, key) in enumerate(rows):
+        for c in range(VOCAB_N_KEYS):
+            ax = axes[r, c]
+            ax.imshow(grid[r][c]); ax.set_xticks([]); ax.set_yticks([])
+            for s in ax.spines.values():
+                s.set_visible(False)
+        axes[r, 0].set_ylabel(label.replace(" (", "\n("), fontsize=9)
+        if r == len(rows) - 1:
+            axes[r, 0].text(0.0, -0.08,
+                            VOCAB_TEXT_LABEL.get(key, CORPUS[key][1]),
+                            transform=axes[r, 0].transAxes,
+                            fontsize=8.5, style="italic", color="#444")
+    plt.tight_layout(pad=0.2)
+    plt.subplots_adjust(hspace=0.02, wspace=0.02)
+    out = "results/plots/plot_11_vocabulary.png"
+    fig.savefig(out, dpi=170, bbox_inches="tight")
+    plt.close()
+    print(f"Saved {out}")
+
+    # --- metrics ---
+    os.makedirs(os.path.join("results", "metrics"), exist_ok=True)
+    out_path = os.path.join("results", "metrics", "vocabulary_ablation.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("Vocabulary Ablation: one operator, two movement vocabularies\n")
+        f.write("=" * 88 + "\n")
+        for label, _, _ in VOCABULARIES:
+            info = records[label]["vocabulary"]
+            f.write(f"\n[{label}]\n")
+            f.write(f"    regions                 : {info['regions']}\n")
+            f.write(f"    frames quantized        : {info['frames_quantized']} "
+                    f"of {info['frames_total']} ({100.0 * info['frames_quantized'] / info['frames_total']:.1f}%)\n")
+            f.write(f"    plausibility density    : {info['graph_density']:.4f}\n")
+            f.write(f"    {'text':24s}{'frames':>8}{'regions':>9}{'energy':>10}{'extension':>11}{'travel':>9}\n")
+            for key in VOCAB_TEXT_KEYS:
+                d = records[label]["texts"][key]
+                f.write(f"    {CORPUS[key][1][:24]:24s}{d['frames']:8d}{d['regions_traversed']:9d}"
+                        f"{d['kinetic_energy']:10.4f}{d['limb_extension']:11.2f}{d['ground_travel']:9.2f}\n")
+
+        # Summed contrast across the corpus, so the paper can quote one number.
+        f.write("\nSame genome, different body: corpus means\n")
+        f.write("-" * 88 + "\n")
+        for label, _, _ in VOCABULARIES:
+            t = records[label]["texts"]
+            f.write(f"    {label:26s} energy={np.mean([t[k]['kinetic_energy'] for k in VOCAB_TEXT_KEYS]):.4f}"
+                    f"  extension={np.mean([t[k]['limb_extension'] for k in VOCAB_TEXT_KEYS]):.2f}"
+                    f"  regions={np.mean([t[k]['regions_traversed'] for k in VOCAB_TEXT_KEYS]):.1f}\n")
+    print(f"Saved {out_path}")
+
+    with open(os.path.join("results", "metrics", "vocabulary_ablation.json"), "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--part', type=int, choices=[1, 2, 3, 4, 5], help="Run a specific part of the analysis (1, 2, 3, 4, or 5).")
+    parser.add_argument('--part', type=int, choices=[1, 2, 3, 4, 5, 6, 7], help="Run a specific part of the analysis (1 through 7).")
     args = parser.parse_args()
     
     np.random.seed(42)
@@ -1200,6 +1915,12 @@ def main():
 
     if args.part == 5 or args.part is None:
         run_part_5()
+
+    if args.part == 6 or args.part is None:
+        run_part_6()
+
+    if args.part == 7 or args.part is None:
+        run_part_7()
 
 if __name__ == "__main__":
     main()

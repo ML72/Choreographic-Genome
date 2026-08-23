@@ -2,6 +2,7 @@ numpy==2.4.3
 scipy==1.17.1
 torch==2.9.0
 imageio==2.37.3
+imageio-ffmpeg==0.6.0
 pyrender==0.1.45
 smplx==0.1.28
 trimesh==4.11.5
