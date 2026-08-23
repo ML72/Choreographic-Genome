@@ -68,9 +68,8 @@ const CASES: CaseItem[] = [
 
 const STEPS = [
   { n: '1', title: 'A vocabulary of movement', body: 'We align AIST++ motion capture, extract 278 kinematic features per frame, window them over 20 frames, reduce to 64 dimensions with PCA, and cluster into 256 "regions" with K-Means, one per possible byte value.' },
-  { n: '2', title: 'Ordering the alphabet', body: 'K-Means labels clusters arbitrarily, so we rank them along the first principal component. Region id then marks a position on a real kinematic axis, and nearby byte values name nearby gestures instead of unrelated ones.' },
-  { n: '3', title: 'The genome', body: 'Each byte of the input maps straight to its region, the operator above, giving a deterministic choreographic score with no neural black box in the loop.' },
-  { n: '4', title: 'Making it danceable', body: 'A plausibility graph inserts Dijkstra "bridge" regions between gestures no body could perform back to back, and Perlin, SLERP, and Savitzky-Golay smoothing yield fluid, plausible motion.' },
+  { n: '2', title: 'The genome', body: 'Each byte of the input maps straight to its region, the operator above, giving a deterministic choreographic score with no neural black box in the loop.' },
+  { n: '3', title: 'Making it danceable', body: 'A plausibility graph inserts Dijkstra "bridge" regions between gestures no body could perform back to back, and Perlin, SLERP, and Savitzky-Golay smoothing yield fluid, plausible motion.' },
 ];
 
 const KEYWORDS = ['Amplification', 'Embodied visualization', 'Data physicalization', 'Generative art', 'Motion synthesis'];
@@ -133,7 +132,7 @@ const App: React.FC = () => {
             caption={<>
               <strong>Seven texts, seven bodies.</strong> One keyframe from the dance our instrument generates for each
               case-study text, from a Shakespeare sonnet to an &ldquo;SOS&rdquo; in Morse. The mapping never consults
-              meaning, only structure, yet each text produces a visibly distinct dance from the same underlying engine.
+              meaning, only structure, yet each text produces a visibly distinct dance.
             </>}
           />
 
