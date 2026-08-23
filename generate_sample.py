@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import numpy as np
 import os
 import pickle
@@ -26,57 +26,73 @@ def dijkstra_shortest_path(graph, start, target):
                     heapq.heappush(queue, (cost + weight, neighbor, path + [neighbor]))
     return []
 
-def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gender='neutral', physics_algorithms_on=True, render_video=True, verbose=True):
+DEFAULT_INDEX_PATH = os.path.join("data", "index", "motion_index.npz")
+DEFAULT_CODEBOOK_PATH = os.path.join("data", "index", "codebook.npz")
+DEFAULT_GRAPH_PATH = os.path.join("data", "index", "plausibility_graph.pkl")
+
+# Loading the motion index and deriving its velocity/trajectory fields costs far
+# more than generating a single dance, so batch callers (run_analysis.py) would
+# otherwise pay that cost hundreds of times over. Keyed by artifact paths, so an
+# alternate codebook (e.g. a genre-restricted vocabulary) gets its own entry.
+_ENGINE_CACHE = {}
+
+def load_engine(index_path=DEFAULT_INDEX_PATH, codebook_path=DEFAULT_CODEBOOK_PATH,
+                graph_path=DEFAULT_GRAPH_PATH, verbose=True):
+    """
+    Load (and memoize) everything the generator needs that does not depend on the
+    input: the motion database, its derived motion-matching features, the codebook,
+    and the plausibility graph. The returned arrays are shared across calls and
+    must be treated as read-only.
+    """
+    key = (os.path.abspath(index_path), os.path.abspath(codebook_path), os.path.abspath(graph_path))
+    if key in _ENGINE_CACHE:
+        return _ENGINE_CACHE[key]
+
     if verbose: print("Loading indexed data...")
-    index_path = os.path.join("data", "index", "motion_index.npz")
     if not os.path.exists(index_path):
         raise FileNotFoundError(f"Index file not found at {index_path}. Please run create_index.py first.")
-        
+
     index_data = np.load(index_path)
     poses = index_data['poses']
     trans = index_data['trans']
     file_indices = index_data['file_indices']
     frame_indices = index_data['frame_indices']
-    
-    codebook_path = os.path.join("data", "index", "codebook.npz")
+
     if not os.path.exists(codebook_path):
         raise FileNotFoundError(f"Codebook file not found at {codebook_path}. Please run create_codebook.py first.")
     codebook_data = np.load(codebook_path)
     codebook_tokens = codebook_data['tokens']
-    
+
     file_names_path = os.path.join("data", "index", "file_names.json")
     with open(file_names_path, 'r') as f:
         file_names = json.load(f)
-        
-    graph_path = os.path.join("data", "index", "plausibility_graph.pkl")
+
     if not os.path.exists(graph_path):
         raise FileNotFoundError(f"Plausibility graph not found at {graph_path}. Run create_plausibilities.py first.")
     with open(graph_path, 'rb') as f:
         plausibility_graph = pickle.load(f)
-        
+
     if verbose: print("Computing velocities and trajectories...")
     valid_mask = file_indices[:-1] == file_indices[1:]
     valid_mask = np.append(valid_mask, False)
-    
+
     pose_vel = np.zeros_like(poses)
     trans_vel = np.zeros_like(trans)
-    
+
     pose_vel[:-1][valid_mask[:-1]] = poses[1:][valid_mask[:-1]] - poses[:-1][valid_mask[:-1]]
     trans_vel[:-1][valid_mask[:-1]] = trans[1:][valid_mask[:-1]] - trans[:-1][valid_mask[:-1]]
 
     traj_15 = np.zeros_like(trans)
     traj_30 = np.zeros_like(trans)
-    
+
     for offset, traj_array in [(15, traj_15), (30, traj_30)]:
         shifted_trans = np.roll(trans, -offset, axis=0)
         shifted_file_indices = np.roll(file_indices, -offset, axis=0)
         valid_traj_mask = (file_indices == shifted_file_indices)
-        
+
         traj_array[valid_traj_mask] = shifted_trans[valid_traj_mask] - trans[valid_traj_mask]
         traj_array[~valid_traj_mask] = trans_vel[~valid_traj_mask] * offset
 
-    MAX_PLAUSIBLE_COST = 4.0
-    
     # Precompute region reference poses for graceful fallbacks
     if verbose: print("Computing region reference poses...")
     region_centers = {}
@@ -85,6 +101,61 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
             region_mask = (codebook_tokens == r) & valid_mask
             if np.any(region_mask):
                 region_centers[r] = np.mean(poses[region_mask], axis=0)
+
+    # The motion-matching cost is a weighted sum of five squared distances. Folding
+    # those weights into one feature space turns each query into a single matrix
+    # product against precomputed norms, instead of five full-length temporaries:
+    #   dist = mean((p-p*)^2) + mean((pv-pv*)^2) + 10*mean((tv-tv*)^2)
+    #          + 2*mean((j15-j15*)^2) + 2*mean((j30-j30*)^2)
+    # Scaling each block by sqrt(weight / block_dim) makes plain squared Euclidean
+    # distance in the stacked space reproduce that sum exactly.
+    if verbose: print("Building motion-matching feature space...")
+    mm_features = np.concatenate([
+        poses * np.float32(np.sqrt(1.0 / poses.shape[1])),
+        pose_vel * np.float32(np.sqrt(1.0 / pose_vel.shape[1])),
+        trans_vel * np.float32(np.sqrt(10.0 / trans_vel.shape[1])),
+        traj_15 * np.float32(np.sqrt(2.0 / traj_15.shape[1])),
+        traj_30 * np.float32(np.sqrt(2.0 / traj_30.shape[1])),
+    ], axis=1).astype(np.float32)
+    mm_sq_norms = np.einsum('ij,ij->i', mm_features, mm_features)
+
+    # Region lookup shifted by one so the unassigned -1 frames get their own slot
+    # instead of wrapping around to region 255.
+    token_slot = (codebook_tokens.astype(np.int32) + 1)
+
+    engine = dict(poses=poses, trans=trans, file_indices=file_indices, frame_indices=frame_indices,
+                  mm_features=mm_features, mm_sq_norms=mm_sq_norms, token_slot=token_slot,
+                  codebook_tokens=codebook_tokens, file_names=file_names,
+                  plausibility_graph=plausibility_graph, valid_mask=valid_mask,
+                  pose_vel=pose_vel, trans_vel=trans_vel, traj_15=traj_15, traj_30=traj_30,
+                  region_centers=region_centers)
+    _ENGINE_CACHE[key] = engine
+    return engine
+
+def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gender='neutral',
+                    physics_algorithms_on=True, render_video=True, verbose=True,
+                    index_path=DEFAULT_INDEX_PATH, codebook_path=DEFAULT_CODEBOOK_PATH,
+                    graph_path=DEFAULT_GRAPH_PATH, save_outputs=True):
+    engine = load_engine(index_path, codebook_path, graph_path, verbose=verbose)
+    poses = engine['poses']
+    trans = engine['trans']
+    file_indices = engine['file_indices']
+    frame_indices = engine['frame_indices']
+    codebook_tokens = engine['codebook_tokens']
+    file_names = engine['file_names']
+    plausibility_graph = engine['plausibility_graph']
+    valid_mask = engine['valid_mask']
+    pose_vel = engine['pose_vel']
+    trans_vel = engine['trans_vel']
+    traj_15 = engine['traj_15']
+    traj_30 = engine['traj_30']
+    region_centers = engine['region_centers']
+    mm_features = engine['mm_features']
+    mm_sq_norms = engine['mm_sq_norms']
+    token_slot = engine['token_slot']
+
+    MAX_PLAUSIBLE_COST = 4.0
+
 
     gen_poses = []
     gen_trans = []
@@ -108,11 +179,17 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
         if verbose: print("Mode A: Autonomous Exploration.")
 
     def compute_mm_dist(target_idx):
-        dist = np.mean((poses - poses[target_idx])**2, axis=1) + np.mean((pose_vel - pose_vel[target_idx])**2, axis=1)
-        dist += np.mean((trans_vel - trans_vel[target_idx])**2, axis=1) * 10.0
-        dist += np.mean((traj_15 - traj_15[target_idx])**2, axis=1) * 2.0
-        dist += np.mean((traj_30 - traj_30[target_idx])**2, axis=1) * 2.0
+        # ||a - b||^2 = ||a||^2 - 2 a.b + ||b||^2 over the weighted feature space
+        dist = mm_sq_norms - 2.0 * (mm_features @ mm_features[target_idx])
+        dist += mm_sq_norms[target_idx]
         return dist
+
+    def best_candidates(dist, k=10):
+        """The k lowest-cost frames, cheapest first. Only the head of the ranking
+        is ever inspected, so a full sort of the million-frame database is waste."""
+        k = min(k, len(dist))
+        head = np.argpartition(dist, k - 1)[:k]
+        return head[np.argsort(dist[head], kind='stable')]
 
     if mode == "A":
         curr_idx = np.random.randint(0, len(poses) - 1)
@@ -170,16 +247,16 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
                 dist = compute_mm_dist(target_idx) if not forced_jump else compute_mm_dist(curr_idx)
                 
                 # Apply novelty penalty to avoid repetitive loops
-                novelty_penalty = np.zeros_like(dist)
+                region_penalty = np.zeros(258, dtype=dist.dtype)
                 for i, r in enumerate(reversed(executed_dna[-20:])):
-                    novelty_penalty[codebook_tokens == r] += 5.0 / (i + 1)
-                dist += novelty_penalty
+                    region_penalty[int(r) + 1] += 5.0 / (i + 1)
+                dist = dist + region_penalty[token_slot]
                 
                 dist[~valid_mask] = np.inf
                 dist[codebook_tokens == -1] = np.inf
                 dist[codebook_tokens == current_region] = np.inf
                 
-                sort_idx = np.argsort(dist)
+                sort_idx = best_candidates(dist)
                 found_good = False
                 for i in range(min(10, len(sort_idx))):
                     candidate_idx = sort_idx[i]
@@ -209,7 +286,7 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
                 dist[~valid_mask] = np.inf
                 dist[codebook_tokens != T_next] = np.inf
                 
-                sort_idx = np.argsort(dist)
+                sort_idx = best_candidates(dist)
                 found_good = False
                 for i in range(min(10, len(sort_idx))):
                     candidate_idx = sort_idx[i]
@@ -399,7 +476,8 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
         gen_trans = gen_trans_np.tolist()
 
     results_dir = os.path.join("results", "samples", run_name)
-    os.makedirs(results_dir, exist_ok=True)
+    if save_outputs or render_video:
+        os.makedirs(results_dir, exist_ok=True)
     pkl_out = os.path.join(results_dir, "dance_moves.pkl")
     mp4_out = os.path.join(results_dir, "dance_visualization.mp4")
     json_out = os.path.join(results_dir, "run_data.json")
@@ -420,19 +498,20 @@ def generate_motion(num_frames, run_name, dna_string=None, input_text=None, gend
         "executed_dna": ",".join(str(x) for x in executed_dna),
         "frame_data": gen_metadata
     }
-    with open(json_out, 'w') as f:
-        json.dump(run_data, f, indent=4)
-    if verbose: print(f"Saved run data to {json_out}")
+    if save_outputs:
+        with open(json_out, 'w') as f:
+            json.dump(run_data, f, indent=4)
+        if verbose: print(f"Saved run data to {json_out}")
 
-    output_dict = {
-        'smpl_poses': np.array(gen_poses),
-        'smpl_trans': np.array(gen_trans),
-        'smpl_scaling': np.array([1.0])
-    }
-    
-    with open(pkl_out, 'wb') as f:
-        pickle.dump(output_dict, f)
-    if verbose: print(f"Saved motion data to {pkl_out}")
+        output_dict = {
+            'smpl_poses': np.array(gen_poses),
+            'smpl_trans': np.array(gen_trans),
+            'smpl_scaling': np.array([1.0])
+        }
+
+        with open(pkl_out, 'wb') as f:
+            pickle.dump(output_dict, f)
+        if verbose: print(f"Saved motion data to {pkl_out}")
 
     if render_video:
         from util.render import render_animation

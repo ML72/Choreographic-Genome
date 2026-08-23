@@ -78,11 +78,11 @@ def create_plausibilities(args):
     print("Building graph edges...")
     for reg_A in tqdm(regions, desc="Processing source regions"):
         frames_A = region_to_frames[reg_A]
-        
+
         # Sample starting frames for Region A to avoid excessive computation
         num_start_samples = min(max_source_samples, len(frames_A))
         start_frames = np.random.choice(frames_A, num_start_samples, replace=False)
-        
+
         # Collect window frames
         window_frames = []
         for i in start_frames:
@@ -90,33 +90,36 @@ def create_plausibilities(args):
             max_idx = i_end + args.transition_window_size
             if max_idx < len(file_indices) and file_indices[i] == file_indices[max_idx]:
                 window_frames.extend(range(i_end, max_idx + 1))
-                
+
         if not window_frames:
             continue
-            
+
         window_frames = np.array(window_frames)
-        feat_A_windows = global_features[window_frames]  # [W, Feature_Dim]
-        
+        # Squared euclidean distance expanded as ||a||^2 - 2a.b + ||b||^2, so the
+        # inner product runs through BLAS instead of scipy's element-wise loop. The
+        # source block is reused across all 256 targets, so its norms are computed
+        # once. Accumulating in float64 keeps the expansion exact enough that the
+        # plausibility threshold below decides identically to a direct distance.
+        feat_A_windows = global_features[window_frames].astype(np.float64)  # [W, Feature_Dim]
+        sq_A = np.einsum('ij,ij->i', feat_A_windows, feat_A_windows)
+
         for reg_B in regions:
             frames_B = region_to_frames[reg_B]
             if not frames_B:
                 continue
-                
+
             num_samples = min(args.max_target_samples, len(frames_B))
             candidates_j = np.random.choice(frames_B, num_samples, replace=False)
-            feat_B_candidates = global_features[candidates_j]  # [C, Feature_Dim]
-            
-            # Efficient pairwise squared euclidean distance calculation:
-            # (a-b)^2 = a^2 + b^2 - 2ab
-            # Using scipy.spatial.distance.cdist or einsum is incredibly fast here
-            from scipy.spatial.distance import cdist
-            dist_matrix = cdist(feat_A_windows, feat_B_candidates, metric='sqeuclidean')
-            
+            feat_B_candidates = global_features[candidates_j].astype(np.float64)  # [C, Feature_Dim]
+            sq_B = np.einsum('ij,ij->i', feat_B_candidates, feat_B_candidates)
+
+            dist_matrix = sq_A[:, None] - 2.0 * (feat_A_windows @ feat_B_candidates.T) + sq_B[None, :]
+
             # For each sampled source frame, find the best landing spot
-            min_dists = np.min(dist_matrix, axis=1)
+            min_dists = np.maximum(np.min(dist_matrix, axis=1), 0.0)
             valid_sources = min_dists <= args.max_plausible_cost
             valid_ratio = np.mean(valid_sources)
-            
+
             if valid_ratio >= args.min_valid_source_ratio:
                 # Store the average cost of the VALID transitions as the edge weight
                 avg_valid_cost = np.mean(min_dists[valid_sources])
