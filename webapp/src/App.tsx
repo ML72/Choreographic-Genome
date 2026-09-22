@@ -1,13 +1,18 @@
 import React from 'react';
 import {
-  Box, Typography, Button, Container, Divider, Chip,
+  Box, Typography, Button, Container, Divider, Chip, Link,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper,
   AppBar, Toolbar, ThemeProvider, createTheme,
 } from '@mui/material';
 import GitHubIcon from '@mui/icons-material/GitHub';
+import ArticleIcon from '@mui/icons-material/Article';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import CheckIcon from '@mui/icons-material/Check';
 import { MathJaxContext, MathJax } from 'better-react-mathjax';
 
 const GITHUB_URL = 'https://github.com/ML72/Choreographic-Genome';
+const ARXIV_URL = 'https://arxiv.org/abs/2609.22519';
+const VENUE = 'IEEE VIS 2026 Arts Program';
 
 // A light, consistent theme so buttons and headings feel intentional rather
 // than styled ad hoc at each call site.
@@ -48,6 +53,51 @@ const MetricCard: React.FC<{ value: string; label: string; sub: React.ReactNode 
     <Typography variant='body2' sx={{ color: 'text.secondary', mt: 0.5, lineHeight: 1.6 }}>{sub}</Typography>
   </Box>
 );
+
+const BIBTEX = `@misc{li2026choreographicgenome,
+      title={The Choreographic Genome: Amplifying the Silent Structure of Text into Dance}, 
+      author={Michael Li and Alison Ding},
+      year={2026},
+      eprint={2609.22519},
+      archivePrefix={arXiv},
+      primaryClass={cs.HC},
+      url={https://arxiv.org/abs/2609.22519}, 
+}`;
+
+// The citation, with a copy button so nobody has to drag-select across the line
+// breaks. The block stays selectable if the clipboard is unavailable.
+const BibTeX: React.FC = () => {
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(BIBTEX);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <Box sx={{ borderRadius: 2, border: '1px solid rgba(0,0,0,0.08)', background: '#ffffff', overflow: 'hidden', textAlign: 'left' }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, px: 2, py: 0.75, borderBottom: '1px solid rgba(0,0,0,0.08)', background: 'rgba(25,118,210,0.04)' }}>
+        <Typography variant='caption' sx={{ fontWeight: 700, letterSpacing: '0.08em', color: 'text.secondary' }}>
+          BIBTEX
+        </Typography>
+        <Button size='small' onClick={handleCopy} startIcon={copied ? <CheckIcon fontSize='small' /> : <ContentCopyIcon fontSize='small' />}>
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+      </Box>
+      <Box
+        component='pre'
+        sx={{ m: 0, p: 2.5, overflowX: 'auto', fontFamily: 'source-code-pro, Menlo, Consolas, monospace', fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}
+      >
+        {BIBTEX}
+      </Box>
+    </Box>
+  );
+};
 
 // --- The case-study corpus, with the metrics reported by run_analysis.py (Part 4) ---
 
@@ -92,6 +142,17 @@ const App: React.FC = () => {
             <Typography variant='subtitle1' sx={{ fontWeight: 700, flexGrow: 1, letterSpacing: '-0.01em' }}>
               The Choreographic Genome
             </Typography>
+            <Button
+              size='small'
+              variant='outlined'
+              startIcon={<ArticleIcon />}
+              href={ARXIV_URL}
+              target='_blank'
+              rel='noopener'
+              sx={{ borderColor: 'rgba(0,0,0,0.18)', color: 'text.primary', '&:hover': { borderColor: 'primary.main', backgroundColor: 'rgba(25,118,210,0.04)' } }}
+            >
+              Paper
+            </Button>
             <Button
               size='small'
               variant='outlined'
@@ -417,6 +478,20 @@ const App: React.FC = () => {
                 ballet-jazz subset alone (bottom).
               </>}
             />
+          </Box>
+
+          <Divider sx={{ borderColor: 'rgba(0,0,0,0.08)', mb: 6 }} />
+
+          {/* Citation */}
+          <Box sx={{ mb: 6 }}>
+            <Typography variant='h4' component='h2' gutterBottom>
+              Citation
+            </Typography>
+            <Typography variant='body1' sx={{ color: 'text.secondary', lineHeight: 1.8, mb: 3 }}>
+              Accepted to the {VENUE} and available on{' '}
+              <Link href={ARXIV_URL} target='_blank' rel='noopener'>arXiv</Link>. If any part of our work is useful, please cite us:
+            </Typography>
+            <BibTeX />
           </Box>
 
           <Divider sx={{ borderColor: 'rgba(0,0,0,0.08)', mb: 4 }} />
