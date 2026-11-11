@@ -1,5 +1,7 @@
 # The Choreographic Genome: Amplifying the Silent Structure of Text into Dance
 
+**Accepted to the IEEE VIS 2026 Arts Program.** Our paper is available at https://arxiv.org/abs/2609.22519.
+
 This codebase implements the choreographic genome: an instrument that maps the raw UTF-8 bytes of a text onto a learned vocabulary of 256 motion regions, quantized from the AIST++ dance dataset, and realizes the resulting sequence as full-body movement through motion matching. It amplifies how a text is built rather than what it means.
 
 ## Setup
@@ -181,3 +183,19 @@ Motion matching alone leaves a visible seam at every jump, so each generated seq
 3. **Contact correction:** `physics_contact_fix` treats low-velocity foot frames as ground contacts and applies a smoothly interpolated height and horizontal correction, so planted feet stay planted.
 
 Part 3 of `run_analysis.py` measures what this buys: foot skating drops from 0.121 to 0.010 and mean jerk from 1.2e-2 to 8.9e-4.
+
+## Citation
+
+If you wish to build off of our work, please cite our paper:
+
+```bibtex
+@misc{li2026choreographicgenome,
+      title={The Choreographic Genome: Amplifying the Silent Structure of Text into Dance}, 
+      author={Michael Li and Alison Ding},
+      year={2026},
+      eprint={2609.22519},
+      archivePrefix={arXiv},
+      primaryClass={cs.HC},
+      url={https://arxiv.org/abs/2609.22519}, 
+}
+```
